@@ -1,0 +1,93 @@
+# Global Settings - Shared by all models
+equation: "darcy"
+resolution: 64
+
+# Normalizer values must be identical for all models to compare them fairly
+normaliser:
+  permeability:
+    mean: 1.25
+    std_dev: 0.75
+  darcy:
+    mean: 4.52E-2
+    std_dev: 2.79E-2
+
+# Define a shared architecture template to avoid double-entry
+# This is used by both FNO and PINO
+fno_shared_arch:
+  in_channels: 1
+  out_channels: 1
+  dimension: 2
+  latent_channels: 32
+  num_fno_layers: 4
+  num_fno_modes: 12
+  padding: 9
+  decoder_layers: 1
+  decoder_layer_size: 32
+
+
+# Phase Toggles
+do_fno: True
+do_pinn: True
+do_pino: True
+
+# --- FNO CONFIG ---
+fno:
+  normaliser: ${normaliser}
+  arch: ${fno_shared_arch}
+  training:
+    resolution: 64
+    batch_size: 64
+    rec_results_freq : 8
+    max_pseudo_epochs: 256
+    pseudo_epoch_sample_size: 2048
+  validation:
+    sample_size: 256
+    validation_pseudo_epochs: 4
+  scheduler:
+    initial_lr: 1.E-3
+    decay_rate: .85
+    decay_pseudo_epochs: 8
+
+# --- PINN CONFIG (MLP) ---
+pinn:
+  normaliser: ${normaliser}
+  arch:
+    layers: 6
+    layer_size: 512
+    activation: "tanh"
+  training:
+    batch_size: 1024 # Points per iteration
+    max_epochs: 5000
+    start_lr: 1.E-3
+    checkpoint_freq: 500
+  physics:
+    forcing_term: 1.0        # This is your Beta (source term)
+    grad_method: "autodiff"
+  scheduler:
+    initial_lr: 1e-3
+    type: "adam"             # Start with Adam, maybe move to L-BFGS later
+
+# --- PINO CONFIG (Hybrid) ---
+pino:
+  normaliser: ${normaliser}
+  # PINO usually inherits the FNO architecture
+  training:
+    batch_size: 64
+    max_epochs: 50
+    start_lr: 0.001
+    gamma: 0.9994
+  physics:
+    weight: 0.1
+    grad_method: "finite_difference"
+  arch: ${fno_shared_arch}
+  model:
+    fno:
+      in_channels: 1
+      out_channels: 1
+      decoder_layers: 1
+      decoder_layer_size: 32
+      dimension: 2
+      latent_channels: 32
+      num_fno_layers: 4
+      num_fno_modes: 12
+      padding: 9

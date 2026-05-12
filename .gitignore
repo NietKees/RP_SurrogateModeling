@@ -1,0 +1,17 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.log
+*.txt
+# PhysicsNeMo / Hydra outputs
+outputs/
+multirun/
+.hydra/
+
+# LARGE DATA & MODELS (Do not upload these!)
+checkpoints/
+*.pt
+*.h5
+*.npy
+data/
+*.sif

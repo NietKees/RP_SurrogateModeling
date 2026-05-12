@@ -1,0 +1,25 @@
+# Configuration for Darcy PINN
+defaults:
+  - _self_
+
+# Architecture Settings for a PINN (MLP)
+arch:
+  layers: 6                # Depth of the neural network
+  layer_size: 512          # Width of each layer
+  activation: "tanh"       # CRITICAL: PINNs need smooth activations for derivatives
+
+# Training Settings
+training:
+  batch_size: 32         # PINNs use large batches of random points
+  max_epochs: 5000         # PINNs usually need more iterations than FNO
+  checkpoint_freq: 500
+  
+# Physics Settings (Darcy PDE)
+physics:
+  forcing_term: 1.0        # This is your Beta (source term)
+  grad_method: "autodiff"  # PINNs use Automatic Differentiation
+
+# Optimizer
+scheduler:
+  initial_lr: 1e-3
+  type: "adam"             # Start with Adam, maybe move to L-BFGS later

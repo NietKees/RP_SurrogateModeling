@@ -53,6 +53,7 @@ class GridValidator:
         prediction: FloatTensor,
         step: int,
         logger: LaunchLogger,
+        title=None
     ) -> float:
         """compares model output, target and plots everything
 
@@ -81,8 +82,8 @@ class GridValidator:
         invar = invar * norm["permeability"][1] + norm["permeability"][0]
         target = target * norm["darcy"][1] + norm["darcy"][0]
         prediction = prediction * norm["darcy"][1] + norm["darcy"][0]
-        invar = invar.cpu().numpy()[0, -1, :, :]
-        target = target.cpu().numpy()[0, 0, :, :]
+        invar = invar.detach().cpu().numpy()[0, -1, :, :]
+        target = target.detach().cpu().numpy()[0, 0, :, :]
         prediction = prediction.detach().cpu().numpy()[0, 0, :, :]
 
         plt.close("all")
@@ -98,6 +99,10 @@ class GridValidator:
             fig.colorbar(im[ii], ax=ax[ii], location="bottom", fraction=0.046, pad=0.04)
             ax[ii].set_title(self.headers[ii])
 
-        logger.log_figure(figure=fig, artifact_file=f"validation_step_{step:03d}.png")
-
+        if(step % 32 == 0):
+            if(title != None):
+                logger.log_figure(figure=fig, artifact_file=f"images/validation_step_{step:03d}_{title}.png")
+            else:
+                logger.log_figure(figure=fig, artifact_file=f"images/validation_step_{step:03d}.png")
+                
         return loss

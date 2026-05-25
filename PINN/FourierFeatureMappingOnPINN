@@ -1,0 +1,236 @@
+import torch
+import os
+import hydra
+import physicsnemo
+import sys
+from math import ceil
+import numpy as np
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+from omegaconf import DictConfig
+from physicsnemo.distributed import DistributedManager
+from physicsnemo.datapipes.benchmarks.darcy import Darcy2D
+from physicsnemo.models.mlp.fully_connected import FullyConnected
+from physicsnemo.sym.eq.phy_informer import PhysicsInformer
+from physics_utils import get_physics_informer
+from data_utils import get_darcy_setup
+from physicsnemo.utils.logging import LaunchLogger, PythonLogger
+from physicsnemo.utils import (
+    StaticCaptureTraining,
+    StaticCaptureEvaluateNoGrad,
+    load_checkpoint,
+    save_checkpoint,
+)
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+def denormalize(x, mean, std):
+    return x * std + mean
+
+class FourierEncoder(torch.nn.Module):
+    """Projects raw spatial coordinates into a high-frequency feature space."""
+    def __init__(self, mapping_size=32, scale=10.0, device="cuda"):
+        super().__init__()
+        torch.manual_seed(42)
+        # 2 spatial input dimensions (x, y) projected to mapping_size
+        self.B = torch.randn(2, mapping_size, device=device) * scale
+
+    def forward(self, coords):
+        # projected = 2 * pi * coords @ B
+        projected = torch.matmul(coords, self.B) * (2.0 * torch.pi)
+        return torch.cat([torch.sin(projected), torch.cos(projected)], dim=-1)
+
+
+@hydra.main(version_base="1.3", config_path=".", config_name="Darcy_PINN_config")
+def train_pinn(cfg: DictConfig) -> None:
+    os.environ["RANK"] = "0"
+    os.environ["WORLD_SIZE"] = "1"
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+
+    DistributedManager.initialize()
+    dist = DistributedManager()
+    device = dist.device
+    
+    log = PythonLogger(name="parametric_pinn")
+    log.file_logging()
+    LaunchLogger.initialize()
+
+    print(f"Running on device: {device}")
+    os.makedirs("checkpoints", exist_ok=True)
+
+    # Initialize Physics Informer using method specified from your setup
+    physicsInformer = get_physics_informer(device, 'darcy', method="autodiff")
+
+    # Normalization Constants
+    k_mean, k_std = 1.25, 0.75
+    u_mean, u_std = 4.52e-2, 2.79e-2
+
+    # Initialize the spatial encoder (mapping_size=32 outputs 64 features)
+    mapping_size = 32
+    encoder = FourierEncoder(mapping_size=mapping_size, scale=12.0, device=device)
+    
+    # New input dimension calculation: (mapping_size * 2) + 1 parameter feature
+    in_features = (mapping_size * 2) + 1
+
+    # Model Architecture tied directly to your configuration settings
+    model = FullyConnected(
+        in_features=in_features,       
+        out_features=1,                 
+        num_layers=cfg.arch.layers,
+        layer_size=cfg.arch.layer_size,
+        activation_fn=cfg.arch.activation 
+    ).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.scheduler.initial_lr)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.training.gamma)
+    
+    dataloader, validator = get_darcy_setup(cfg)
+    dataloader_iter = iter(dataloader)
+
+    ckpt_args = {
+        "path": "./PINN/checkpoints",
+        "models": model,
+        "optimizer": optimizer,
+        "scheduler": scheduler,
+    }
+
+    # Parametric Forward Training Step
+    @StaticCaptureTraining(model=model, optim=optimizer, use_graphs=False)
+    def forward_train(sampled_coords, sampled_k_norm, bc_coords, bc_k_norm):
+        sampled_coords = sampled_coords.clone().detach().requires_grad_(True)
+        sampled_k_norm = sampled_k_norm.clone().detach().requires_grad_(True)
+
+        # Apply spatial mapping coordinates transformation before passing to model
+        encoded_coords = encoder(sampled_coords)
+        input_tensor = torch.cat([encoded_coords, sampled_k_norm], dim=1)
+        u_norm = model(input_tensor)
+
+        u_phys = u_norm * u_std + u_mean
+        k_phys = sampled_k_norm * k_std + k_mean
+
+        residuals = physicsInformer.forward(
+            {
+                "coordinates": sampled_coords,
+                "u": u_phys,
+                "k": k_phys  
+            }
+        )
+        
+        pde_key = list(residuals.keys())[0]
+        loss_pde = torch.mean(torch.square(residuals[pde_key]))
+
+        # Boundary Conditions Processing with matching Spatial Transformations
+        encoded_bc_coords = encoder(bc_coords)
+        bc_input = torch.cat([encoded_bc_coords, bc_k_norm], dim=1)
+        u_bc_norm = model(bc_input)
+        u_bc_phys = u_bc_norm * u_std + u_mean
+        loss_bc = torch.mean(torch.square(u_bc_phys))
+
+        # Dynamic Loss Weights balanced directly via configuration profile
+        total_loss = (cfg.physics.pde_weight * loss_pde) + (cfg.physics.bc_weight * loss_bc)
+        return total_loss
+    
+    @StaticCaptureEvaluateNoGrad(model=model, logger=log, use_amp=False, use_graphs=False)
+    def forward_eval(invars):
+        return model(invars)
+
+    print("Parametric PINN started training with positional mappings...")
+
+    validation_iters = ceil(cfg.validation.sample_size / cfg.training.batch_size)
+    current_val_error = float('inf')
+    epoch = 1
+
+    while epoch < cfg.training.max_epochs + 1 and current_val_error >= cfg.training.target_error_threshold:
+        try:
+            batch = next(dataloader_iter)
+        except StopIteration:
+            dataloader_iter = iter(dataloader)
+            batch = next(dataloader_iter)
+            
+        perm = batch["permeability"].to(device) 
+        B, _, H, W = perm.shape
+
+        x = torch.linspace(0, 1, H, device=device)
+        y = torch.linspace(0, 1, W, device=device)
+        grid_x, grid_y = torch.meshgrid(x, y, indexing='ij')
+
+        coords_all = torch.stack([grid_x, grid_y], dim=-1).repeat(B, 1, 1, 1) 
+        k_all_norm = perm.permute(0, 2, 3, 1) 
+
+        bc_mask = torch.zeros((H, W), dtype=torch.bool, device=device)
+        bc_mask[0, :] = True; bc_mask[-1, :] = True; bc_mask[:, 0] = True; bc_mask[:, -1] = True
+
+        bc_coords = coords_all[:, bc_mask].view(-1, 2)
+        bc_k_norm = k_all_norm[:, bc_mask].view(-1, 1)
+
+        coords_flat = coords_all.view(-1, 2)
+        k_flat_norm = k_all_norm.reshape(-1, 1)
+
+        # Pulled directly from the config parameters
+        num_samples = cfg.training.num_collocation_points
+        idx = torch.randperm(coords_flat.size(0), device=device)[:num_samples]
+        
+        loss = forward_train(coords_flat[idx], k_flat_norm[idx], bc_coords, bc_k_norm)
+        scheduler.step()
+
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch} | Total Multi-Parametric Loss: {loss.item():.6e} | LR: {optimizer.param_groups[0]['lr']:.3e}")
+
+        if epoch % cfg.training.checkpoint_freq == 0:
+            save_checkpoint(**ckpt_args, epoch=epoch)
+            log.success(f"Checkpoint saved at epoch {epoch}")
+
+        # ========================================================
+        # VALIDATION PIPELINE
+        # ========================================================
+        if epoch % cfg.validation.validation_pseudo_epochs == 0:
+            with LaunchLogger("PINN_valid", epoch=epoch) as logger:
+                total_error = 0.0
+                
+                for i, batch in zip(range(validation_iters), dataloader):
+                    invar = batch["permeability"].to(device)  
+                    target = batch["darcy"].to(device)        
+                    val_B, _, val_H, val_W = invar.shape
+                    
+                    x_test = torch.linspace(0, 1, val_H, device=device)
+                    y_test = torch.linspace(0, 1, val_W, device=device)
+                    grid_x_t, grid_y_t = torch.meshgrid(x_test, y_test, indexing='ij')
+                    
+                    coords_all_t = torch.stack([grid_x_t, grid_y_t], dim=-1).repeat(val_B, 1, 1, 1) 
+                    k_all_norm_t = invar.permute(0, 2, 3, 1) 
+                    
+                    coords_flat_t = coords_all_t.view(-1, 2)
+                    k_flat_norm_t = k_all_norm_t.reshape(-1, 1)
+                    
+                    with torch.no_grad():
+                        # Make sure validation uses identical positional mappings
+                        encoded_flat_t = encoder(coords_flat_t)
+                        input_eval = torch.cat([encoded_flat_t, k_flat_norm_t], dim=1)
+                        pred_flat = forward_eval(input_eval)
+                        
+                        pred = pred_flat.view(val_B, val_H, val_W, 1).permute(0, 3, 1, 2)
+
+                    loss = validator.compare(
+                        invar, target, pred, 
+                        step=i, logger=logger, 
+                        title=f'validation_{epoch} PINN'
+                    )
+                    
+                    relative_l2 = float(loss.detach().cpu().item())
+                    total_error += relative_l2
+
+                current_val_error = total_error / validation_iters
+                logger.log_epoch({"relative_l2_physical": current_val_error})
+                print(f"--- Epoch {epoch} | GridValidator L2 Error: {current_val_error:.6f} ---")
+        epoch += 1
+                  
+    save_checkpoint(**ckpt_args, epoch=epoch - 1)
+    log.success(f"PINO training complete. Final error achieved: {current_val_error:.5f}")
+
+if __name__ == "__main__":
+    train_pinn()

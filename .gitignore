@@ -15,3 +15,5 @@ checkpoints/
 *.npy
 data/
 *.sif
+*.mdlus
+*.png

@@ -17,7 +17,7 @@
 import matplotlib.pyplot as plt
 from torch import FloatTensor
 from physicsnemo.utils.logging import LaunchLogger
-
+import os
 
 class GridValidator:
     """Grid Validator
@@ -37,10 +37,12 @@ class GridValidator:
 
     def __init__(
         self,
+        save_path,
         loss_fun,
         norm: dict = {"permeability": (0.0, 1.0), "darcy": (0.0, 1.0)},
         font_size: float = 28.0,
     ):
+        self.save_path = save_path
         self.norm = norm
         self.criterion = loss_fun
         self.font_size = font_size
@@ -97,6 +99,11 @@ class GridValidator:
         for ii in range(len(im)):
             fig.colorbar(im[ii], ax=ax[ii], location="bottom", fraction=0.046, pad=0.04)
             ax[ii].set_title(self.headers[ii])
+
+        # 1. Save to custom local storage
+        filename = f"validation_step_{step:03d}.png"
+        full_path = os.path.join(self.save_path, filename)
+        fig.savefig(full_path)
 
         logger.log_figure(figure=fig, artifact_file=f"validation_step_{step:03d}.png")
 

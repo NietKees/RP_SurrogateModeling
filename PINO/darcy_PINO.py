@@ -28,7 +28,8 @@ import torch.nn.functional as F
 from hydra.utils import to_absolute_path
 from physicsnemo.utils.logging import LaunchLogger
 from physicsnemo.distributed import DistributedManager
-from physicsnemo.utils.checkpoint import save_checkpoint
+from physicsnemo.utils import StaticCaptureTraining, StaticCaptureEvaluateNoGrad
+from physicsnemo.utils import load_checkpoint, save_checkpoint
 from physicsnemo.models.fno import FNO
 from physicsnemo.datapipes.benchmarks.darcy import Darcy2D
 from physicsnemo.sym.eq.pdes.diffusion import Diffusion
@@ -38,6 +39,7 @@ from torch.utils.data import DataLoader
 from validator import GridValidator
 from data_utils import get_darcy_setup
 from physics_utils import get_physics_informer
+
 def validation_step(model, dataloader, epoch):
     """Validation Step"""
     model.eval()
@@ -76,8 +78,8 @@ def validation_step(model, dataloader, epoch):
         return loss_epoch / len(dataloader)
 
 
-@hydra.main(version_base="1.3", config_path=".", config_name="config_pino.yaml")
-def main(cfg: DictConfig):
+# @hydra.main(version_base="1.3", config_path=".", config_name="config_pino.yaml")
+def train_pino(cfg: DictConfig):
     os.environ["RANK"] = "0"
     os.environ["WORLD_SIZE"] = "1"
     os.environ["MASTER_ADDR"] = "localhost"
@@ -91,8 +93,6 @@ def main(cfg: DictConfig):
     torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     LaunchLogger.initialize()
-
-    dataloader, validator = get_darcy_setup(cfg)
 
     model = FNO(
         in_channels=cfg.arch.in_channels,
@@ -116,8 +116,18 @@ def main(cfg: DictConfig):
     )
 
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.training.gamma)
+    
+    dataloader, validator = get_darcy_setup(cfg)
 
-    for epoch in range(cfg.max_epochs):
+    ckpt_args = {
+        "path": f"./PINO/checkpoints",
+        "optimizer": optimizer,
+        "scheduler": scheduler,
+        "models": model,
+    }
+    loaded_epoch = load_checkpoint(device=dist.device, **ckpt_args)
+
+    for epoch in range(max(1, loaded_epoch + 1), cfg.training.max_epochs + 1):
         # wrap epoch in launch logger for console logs
         with LaunchLogger(
             "train",
@@ -167,14 +177,17 @@ def main(cfg: DictConfig):
             error = validation_step(model, validator, epoch)
             log.log_epoch({"Validation error": error})
 
-        save_checkpoint(
-            "./checkpoints",
-            models=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            epoch=epoch,
-        )
+        # save_checkpoint(
+        #     "./checkpoints",
+        #     models=model,
+        #     optimizer=optimizer,
+        #     scheduler=scheduler,
+        #     epoch=epoch,
+        # )
+        # 4. Save using the NVIDIA utility
+        if epoch % cfg.rec_results_freq == 0:
+            save_checkpoint(**ckpt_args, epoch=epoch)
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

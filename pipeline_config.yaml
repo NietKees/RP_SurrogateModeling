@@ -1,6 +1,12 @@
 # Global Settings - Shared by all models
 equation: "darcy"
 resolution: 64
+test_samples: 32
+
+# Phase Toggles
+do_fno: False
+do_pinn: True
+do_pino: False
 
 # Normalizer values must be identical for all models to compare them fairly
 normaliser:
@@ -17,29 +23,38 @@ fno_shared_arch:
   in_channels: 1
   out_channels: 1
   dimension: 2
-  latent_channels: 32
+  latent_channels: 64
   num_fno_layers: 4
-  num_fno_modes: 12
+  num_fno_modes: 32
   padding: 9
   decoder_layers: 1
-  decoder_layer_size: 32
+  decoder_layer_size: 32 # 64
+  out_features: 1
 
-
-# Phase Toggles
-do_fno: True
-do_pinn: True
-do_pino: True
-
-# --- FNO CONFIG ---
-fno:
-  normaliser: ${normaliser}
-  arch: ${fno_shared_arch}
-  training:
+training:
+    target_error_threshold: 0.005
     resolution: 64
     batch_size: 64
     rec_results_freq : 8
     max_pseudo_epochs: 256
     pseudo_epoch_sample_size: 2048
+    start_lr: 5e-4
+    gamma: 0.985 # 0.9994
+
+scheduler:
+  
+# --- FNO CONFIG ---
+fno:
+  normaliser: ${normaliser}
+  arch: ${fno_shared_arch}
+  training: ${training}
+    # resolution: 64
+    # batch_size: 64
+    # rec_results_freq : 8
+    # max_pseudo_epochs: 1024
+    # pseudo_epoch_sample_size: 2048
+    # start_lr: 0.001
+    # gamma: 0.9994
   validation:
     sample_size: 256
     validation_pseudo_epochs: 4
@@ -50,44 +65,79 @@ fno:
 
 # --- PINN CONFIG (MLP) ---
 pinn:
+  equation: ${equation}
   normaliser: ${normaliser}
+  parameters:
+    num_params: 2
+    ranges:
+      permeability_scale: [0.1, 5.0]
+      source_strength: [0.1, 10.0]
   arch:
-    layers: 6
-    layer_size: 512
-    activation: "tanh"
+    arch:
+    latent_dim: 32
+    hidden_dim: 128
+    num_layers: 4
+    # layers: 6
+    # layer_size: 512          # FIXED: Increased from 128 to handle parametric complexity
+    # activation: "silu"       # FIXED: Switched from tanh to silu for better gradient propagation
   training:
-    batch_size: 1024 # Points per iteration
+    batch_size: 4
+    checkpoint_freq: 100
+
+    # batch_size: 32           # Number of unique parameter sets sampled per batch
     max_epochs: 5000
     start_lr: 1.E-3
-    checkpoint_freq: 500
+    # checkpoint_freq: 500
+    resolution: 64           # Grid resolution for your 4D PhysicsInformer
+    rec_results_freq: 100
+    target_error_threshold: 0.005
+    gamma: 0.9995            # FIXED: Changed from 0.995 so your LR doesn't vanish mid-run
+    steps_per_epoch: 32      
+    num_collocation_points: 512
+    num_boundary_points: 4096
   physics:
-    forcing_term: 1.0        # This is your Beta (source term)
-    grad_method: "autodiff"
+    forcing_term: 1.0        
+    grad_method: "fd"        # RECOMMENDED: Use Finite Difference / Numerical stencil if utilizing PhysicsInformer
+    pde_weight: 1.0
+    bc_weight: 10.0          # FIXED: Boosted from 0.5 to anchor the unsupervised model to the boundaries
   scheduler:
     initial_lr: 1e-3
-    type: "adam"             # Start with Adam, maybe move to L-BFGS later
+    gamma: 0.9995
+    type: "adam"
+  validation:
+    sample_size: 256
+    validation_pseudo_epochs: 4
 
 # --- PINO CONFIG (Hybrid) ---
 pino:
+  equation: ${equation}
   normaliser: ${normaliser}
-  # PINO usually inherits the FNO architecture
-  training:
-    batch_size: 64
-    max_epochs: 50
-    start_lr: 0.001
-    gamma: 0.9994
+  arch: ${fno_shared_arch} 
+  training: ${training}
   physics:
     weight: 0.1
-    grad_method: "finite_difference"
-  arch: ${fno_shared_arch}
-  model:
-    fno:
-      in_channels: 1
-      out_channels: 1
-      decoder_layers: 1
-      decoder_layer_size: 32
-      dimension: 2
-      latent_channels: 32
-      num_fno_layers: 4
-      num_fno_modes: 12
-      padding: 9
+    grad_method: "funtion_wise" # "finite_difference" #TODO try funtion_wise -> supposed to be faster and more stable or fourier
+  validation:
+      sample_size: 256
+      validation_pseudo_epochs: 4
+  scheduler:
+    initial_lr: 1.E-3
+    decay_rate: .85
+    decay_pseudo_epochs: 8
+
+# --- PINO CONFIG (Hybrid) ---
+pifno:
+  equation: ${equation}
+  normaliser: ${normaliser}
+  arch: ${fno_shared_arch} 
+  training: ${training}
+  physics:
+    weight: 1
+    grad_method: "funtion_wise" # "finite_difference" #TODO try funtion_wise -> supposed to be faster and more stable or fourier
+  validation:
+      sample_size: 256
+      validation_pseudo_epochs: 4
+  scheduler:
+    initial_lr: 1.E-3
+    decay_rate: .85
+    decay_pseudo_epochs: 8

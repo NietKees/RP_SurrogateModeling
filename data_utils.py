@@ -2,6 +2,9 @@ import torch
 from torch.nn import MSELoss
 from physicsnemo.datapipes.benchmarks.darcy import Darcy2D
 from validator import GridValidator
+from physicsnemo.utils.logging import LaunchLogger
+import torch.nn.functional as F
+
 def get_darcy_setup(cfg=None, resolution=64, batch_size=32):
     """
     Centralized data and validation setup.
@@ -35,8 +38,10 @@ def get_darcy_setup(cfg=None, resolution=64, batch_size=32):
 
     # 4. Create Validator
     # outsourced here so all scripts use the same MSE logic
-    validator = GridValidator(loss_fun=MSELoss(reduction="mean"))
-
+    # validator = GridValidator(loss_fun=MSELoss(reduction="mean"))
+    validator = GridValidator(
+        loss_fun=RelativeL2Loss()
+    )
     return dataloader, validator
 
 def prepare_pinn_data(batch, device):
@@ -52,6 +57,60 @@ def prepare_pinn_data(batch, device):
     a_vals = perm.permute(0, 2, 3, 1).reshape(-1, 1)
     return coords, a_vals
 
+
+class RelativeL2Loss(torch.nn.Module):
+    def __init__(self, eps=1e-12):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, pred, target):
+
+        batch_size = pred.shape[0]
+
+        pred = pred.reshape(batch_size, -1)
+        target = target.reshape(batch_size, -1)
+
+        diff_norm = torch.norm(pred - target, p=2, dim=1)
+        target_norm = torch.norm(target, p=2, dim=1)
+
+        rel_l2 = diff_norm / (target_norm + self.eps)
+
+        return rel_l2.mean()
+
+# def run_training_loop(model, dataloader, optimizer, scheduler, cfg, device, phy_informer=None):
+    # """
+    # If phy_informer is None, this acts as standard FNO training.
+    # If phy_informer is provided, it acts as PINO training.
+    # """
+    # for epoch in range(cfg.max_epochs):
+    #     with LaunchLogger("train", epoch=epoch) as log:
+    #         for batch in dataloader:
+    #             optimizer.zero_grad()
+    #             invar, target = batch["permeability"].to(device), batch["darcy"].to(device)
+
+    #             # 1. Prediction & Data Loss
+    #             pred = model(invar)
+    #             loss_data = F.mse_loss(pred, target)
+
+    #             # 2. Physics Loss (The PINO "Toggle")
+    #             if phy_informer is not None:
+    #                 # Compute PDE residuals
+    #                 res = phy_informer.forward({"u": pred, "k": invar[:, 0:1]})
+    #                 pde_res = res["diffusion_u"]
+                    
+    #                 # Apply the same padding logic you used before
+    #                 pde_res = F.pad(pde_res[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0)
+    #                 loss_pde = F.mse_loss(pde_res, torch.zeros_like(pde_res))
+                    
+    #                 # Total Loss
+    #                 loss = loss_data + (cfg.physics_weight * loss_pde)
+    #             else:
+    #                 loss = loss_data
+
+    #             loss.backward()
+    #             optimizer.step()
+    #     scheduler.step()
+    # return model
 """--------------------------------------------------"""
 # import torch
 # import h5py

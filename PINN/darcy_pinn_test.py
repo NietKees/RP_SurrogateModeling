@@ -2,6 +2,12 @@ import torch
 import os
 import hydra
 import physicsnemo
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 
 from omegaconf import DictConfig
 from physicsnemo.distributed import DistributedManager
@@ -41,7 +47,7 @@ def darcy_pinn_trainer(cfg: DictConfig )-> None:
     #     grad_method="autodiff",
     #     device=device
     # )
-    physicsInformer = get_physics_informer(device, darcy_eq, method="autodiff")
+    physicsInformer = get_physics_informer(device, 'darcy', method="autodiff")
 
     """
         End of physics informer
@@ -96,7 +102,7 @@ def darcy_pinn_trainer(cfg: DictConfig )-> None:
     dataloader = iter(dataloader)
 
     # Training
-    for epoch, in range(1, cfg.training.max_epochs + 1):
+    for epoch in range(1, cfg.training.max_epochs + 1):
         try:
             batch = next(dataloader_iter)
         except StopIteration:

@@ -38,8 +38,8 @@ from physicsnemo.utils.logging import PythonLogger, LaunchLogger
 # from physicsnemo.validator import GridValidator
 from data_utils import get_darcy_setup
 
-@hydra.main(version_base="1.3", config_path=".", config_name="config_fno.yaml")
-def darcy_trainer(cfg: DictConfig) -> None:
+# @hydra.main(version_base="1.3", config_path=".", config_name="config_fno.yaml")
+def fno_trainer(cfg: DictConfig) -> None:
     """Training for the 2D Darcy flow benchmark problem.
 
     This training script demonstrates how to set up a data-driven model for a 2D Darcy flow
@@ -76,26 +76,23 @@ def darcy_trainer(cfg: DictConfig) -> None:
         padding=cfg.arch.padding,
     ).to(dist.device)
     loss_fun = MSELoss(reduction="mean")
-    optimizer = Adam(model.parameters(), lr=cfg.scheduler.initial_lr)
-    scheduler = lr_scheduler.LambdaLR(
-        optimizer, lr_lambda=lambda step: cfg.scheduler.decay_rate**step
-    )
-    # norm_vars = cfg.normaliser
-    # normaliser = {
-    #     "permeability": (norm_vars.permeability.mean, norm_vars.permeability.std_dev),
-    #     "darcy": (norm_vars.darcy.mean, norm_vars.darcy.std_dev),
-    # }
-    # dataloader = Darcy2D(
-    #     resolution=cfg.training.resolution,
-    #     batch_size=cfg.training.batch_size,
-    #     normaliser=normaliser,
-    # )
-    # validator = GridValidator(loss_fun=MSELoss(reduction="mean"))
 
+    optimizer = Adam(model.parameters(), lr=cfg.scheduler.initial_lr)
+
+    # scheduler = lr_scheduler.LambdaLR(
+    #     optimizer, lr_lambda=lambda step: cfg.scheduler.decay_rate**step
+    # )
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.training.gamma)
+    # This drops the LR by 15% (multiplies by 0.85) every 8 epochs
+    # scheduler = torch.optim.lr_scheduler.StepLR(
+    #     optimizer, 
+    #     step_size=cfg.scheduler.decay_pseudo_epochs, 
+    #     gamma=cfg.scheduler.decay_rate
+    # )
     dataloader, validator = get_darcy_setup(cfg)
 
     ckpt_args = {
-        "path": f"./checkpoints",
+        "path": f"./FNO/checkpoints",
         "optimizer": optimizer,
         "scheduler": scheduler,
         "models": model,
@@ -142,10 +139,16 @@ def darcy_trainer(cfg: DictConfig) -> None:
         log.success("Training started...")
     else:
         log.warning(f"Resuming training from pseudo epoch {loaded_pseudo_epoch + 1}.")
+    
 
-    for pseudo_epoch in range(
-        max(1, loaded_pseudo_epoch + 1), cfg.training.max_pseudo_epochs + 1
-    ):
+    pseudo_epoch = max(1, loaded_pseudo_epoch + 1)
+    current_val_error = float('inf')
+    target_error_threshold = cfg.training.target_error_threshold
+    while current_val_error >= target_error_threshold and pseudo_epoch <= cfg.training.max_pseudo_epochs + 1:
+        
+    # for pseudo_epoch in range(
+    #     max(1, loaded_pseudo_epoch + 1), cfg.training.max_pseudo_epochs + 1
+    # ):
         # Wrap epoch in launch logger for console / MLFlow logs
         with LaunchLogger(**log_args, epoch=pseudo_epoch) as logger:
             for _, batch in zip(range(steps_per_pseudo_epoch), dataloader):
@@ -171,17 +174,19 @@ def darcy_trainer(cfg: DictConfig) -> None:
                     )
                     total_loss += val_loss
                 logger.log_epoch({"Validation error": total_loss / validation_iters})
-
+                current_val_error = total_loss/validation_iters
         # update learning rate
-        if pseudo_epoch % cfg.scheduler.decay_pseudo_epochs == 0:
-            scheduler.step()
+        # if pseudo_epoch % cfg.scheduler.decay_pseudo_epochs == 0:
+        scheduler.step()
         if pseudo_epoch % 10 == 0:
             save_path = os.path.join('checkpoints', f"fno_checkpoint_{pseudo_epoch}.pt")
             torch.save(model.state_dict(), save_path)
+        
+        pseudo_epoch += 1
 
     save_checkpoint(**ckpt_args, epoch=cfg.training.max_pseudo_epochs)
     log.success("Training completed *yay*")
 
 
-if __name__ == "__main__":
-    darcy_trainer()
+# if __name__ == "__main__":
+#     darcy_trainer()

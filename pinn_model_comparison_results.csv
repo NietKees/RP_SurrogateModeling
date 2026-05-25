@@ -1,0 +1,3 @@
+Model,Scenario,Mean_error,Std_Loss,Resolution,Amount of samples
+PINN,Standard (Train),1.9614438116550446,0.046021435326163,64,32
+PINN,light Clay,1.01936636865139,0.00348433060033357,64,32

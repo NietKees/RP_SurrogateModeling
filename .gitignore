@@ -10,6 +10,7 @@ multirun/
 
 # LARGE DATA & MODELS (Do not upload these!)
 checkpoints/
+images/
 *.pt
 *.h5
 *.npy

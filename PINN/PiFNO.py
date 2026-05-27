@@ -138,7 +138,7 @@ def train_pifno(cfg: DictConfig):
     # --------------------------------------------------------
 
     ckpt_args = {
-        "path": "./PINN/PiFNO/checkpoints",
+        "path": "./PIFNO3/checkpoints",
         "models": model,
         "optimizer": optimizer,
         "scheduler": scheduler,
@@ -174,7 +174,18 @@ def train_pifno(cfg: DictConfig):
     def forward_train(invars_norm, target_norm):
 
         pred_norm = model(invars_norm)
-        # loss_data = F.mse_loss(pred_norm, target_norm)
+
+        # 2. Hard-code the boundary conditions directly on the model prediction
+        # This keeps the ranges anchored and prevents edge leaks!
+
+        bc_mask = torch.ones_like(pred_norm)
+        bc_mask[:, :, 0, :] = 0.0   # Top
+        bc_mask[:, :, -1, :] = 0.0  # Bottom
+        bc_mask[:, :, :, 0] = 0.0   # Left
+        bc_mask[:, :, :, -1] = 0.0  # Right
+        pred_norm = pred_norm * bc_mask
+
+        loss_data = F.mse_loss(pred_norm, target_norm)
 
         k_phys = denormalize(invars_norm[:, 0:1], k_mean, k_std)
         u_phys = denormalize(pred_norm, u_mean, u_std)
@@ -186,20 +197,27 @@ def train_pifno(cfg: DictConfig):
 
         coords = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)
 
+        # Run physics directly on normalized tensors
         residuals = phy_informer.forward(
             {
-                "u": u_phys,
-                "k": k_phys,
+                "u": pred_norm,             # Normalized
+                "k": invars_norm[:, 0:1],    # Normalized
                 "coordinates": coords,
             }
         )
 
         pde_residual = residuals["diffusion_u"]
         pde_residual = pde_residual[:, :, 2:-2, 2:-2]
-        loss_pde = torch.mean(torch.abs(pde_residual))
-        print(f"physics:{loss_pde}") # , data loss: {loss_data}")
-        physics_weight = cfg.physics.weight * 1/250
+        
+        # Absolute MSE loss (Textbook style)
+        loss_pde = torch.mean(torch.square(pde_residual))
+        
+        physics_weight = cfg.physics.weight
         loss = physics_weight * loss_pde # +loss_data
+
+        loss = (physics_weight * loss_pde) # + (bc_weight * loss_bc)
+        print(f"physics:{loss_pde * physics_weight}, data loss: {loss_data}")
+
         return loss
 
     # ========================================================
@@ -289,6 +307,7 @@ def train_pifno(cfg: DictConfig):
                         pred_phys,
                         i,  # Let GridValidator manage plotting internally via sample rank
                         logger,
+                        title=f'PiFNO_validation_step_{pseudo_epoch}'
                     )
                     
                     # Safe cast handling for return objects

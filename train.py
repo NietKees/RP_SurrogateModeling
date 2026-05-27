@@ -20,7 +20,7 @@ def main(cfg: DictConfig):
     if cfg.do_pinn:
         print("--- Starting PINN Training ---")
         # pinn_model = train_p2inn(cfg.pinn)
-        PiFNO = train_pifno(cfg.pino)
+        PiFNO = train_pifno(cfg.pifno)
     # Phase 3: Train PINO (Using FNO weights as starting point)
     if cfg.do_pino:
 

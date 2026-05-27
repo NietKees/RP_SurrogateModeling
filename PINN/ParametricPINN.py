@@ -186,7 +186,7 @@ def train_p2inn(cfg: DictConfig) -> None:
 
         # Domain interior prediction evaluation
         u_norm = model(sampled_coords, sampled_embeddings)
-        u_phys = u_  norm * u_std + u_mean
+        u_phys = u_norm * u_std + u_mean
         k_phys = sampled_k_norm * k_std + k_mean
 
         residuals = physicsInformer.forward(

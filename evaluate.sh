@@ -6,7 +6,7 @@
 #SBATCH --mem-per-gpu=8000MB
 #SBATCH --time=3:00:00
 #SBATCH --output=out.txt
-#
+
 
 cd /scratch/$USER/physicsnemo
 

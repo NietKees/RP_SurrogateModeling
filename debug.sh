@@ -4,7 +4,7 @@
 #SBATCH -n 1
 #SBATCH -c 2
 #SBATCH --mem-per-gpu=8000MB
-#SBATCH --time=4:00:00
+#SBATCH --time=00:10:00
 #SBATCH --output=out.txt
 
 
@@ -12,9 +12,8 @@ cd /scratch/$USER/physicsnemo
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# apptainer exec --nv physicsnemo_26.03.sif \
-# python train.py
-
-
 apptainer exec --nv physicsnemo_26.03.sif \
-python evaluate.py
+python PINO/darcy_PINO.py
+
+# python test_darcy_generator.py
+

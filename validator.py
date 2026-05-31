@@ -38,7 +38,7 @@ class GridValidator:
     def __init__(
         self,
         loss_fun,
-        norm: dict = {"permeability": (0.0, 1.0), "darcy": (0.0, 1.0)},
+        norm: dict = {"input": (0.0, 1.0), "output": (0.0, 1.0)},
         font_size: float = 28.0,
     ):
         self.norm = norm
@@ -79,9 +79,9 @@ class GridValidator:
         norm = self.norm
 
         # pick first sample from batch
-        invar = invar * norm["permeability"][1] + norm["permeability"][0]
-        target = target * norm["darcy"][1] + norm["darcy"][0]
-        prediction = prediction * norm["darcy"][1] + norm["darcy"][0]
+        invar = invar * norm["input"][1] + norm["input"][0]
+        target = target * norm["output"][1] + norm["output"][0]
+        prediction = prediction * norm["output"][1] + norm["output"][0]
         invar = invar.detach().cpu().numpy()[0, -1, :, :]
         target = target.detach().cpu().numpy()[0, 0, :, :]
         prediction = prediction.detach().cpu().numpy()[0, 0, :, :]
@@ -93,7 +93,7 @@ class GridValidator:
         im.append(ax[0].imshow(invar))
         im.append(ax[1].imshow(target))
         im.append(ax[2].imshow(prediction))
-        im.append(ax[3].imshow((prediction - target) / norm["darcy"][1]))
+        im.append(ax[3].imshow((prediction - target) / norm["output"][1]))
 
         for ii in range(len(im)):
             fig.colorbar(im[ii], ax=ax[ii], location="bottom", fraction=0.046, pad=0.04)
@@ -101,7 +101,7 @@ class GridValidator:
 
         if(step % 32 == 0):
             if(title != None):
-                logger.log_figure(figure=fig, artifact_file=f"images/validation_step_{step:03d}_{title}.png")
+                logger.log_figure(figure=fig, artifact_file=f"images/{title}.png")
             else:
                 logger.log_figure(figure=fig, artifact_file=f"images/validation_step_{step:03d}.png")
                 

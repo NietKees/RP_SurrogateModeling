@@ -43,7 +43,7 @@ normaliser:
     mean: 4.52E-2
     std_dev: 2.79E-2
 
-model:
+arch:
   fno:
     in_channels: 1
     out_channels: 1

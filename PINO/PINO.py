@@ -102,6 +102,8 @@ def train_pino(cfg: DictConfig):
     phy_informer = get_physics_informer(
         device=device,
         equation=cfg.equation,
+        res=cfg.training.resolution,
+        method=cfg.physics.grad_method
     )
 
     # --------------------------------------------------------
@@ -160,6 +162,7 @@ def train_pino(cfg: DictConfig):
         cfg.training.batch_size
     )
 
+
     # ========================================================
     # TRAIN STEP
     # ========================================================
@@ -172,33 +175,95 @@ def train_pino(cfg: DictConfig):
         use_graphs=False,
     )
     def forward_train(invars_norm, target_norm):
-
         pred_norm = model(invars_norm)
         loss_data = F.mse_loss(pred_norm, target_norm)
 
         k_phys = denormalize(invars_norm[:, 0:1], k_mean, k_std)
         u_phys = denormalize(pred_norm, u_mean, u_std)
 
+        # u_phys = u_phys.requires_grad_(True)
+        # k_phys = k_phys.requires_grad_(True)
+
         B, _, H, W = u_phys.shape
-        x = torch.linspace(0, 1, H, device=device)
-        y = torch.linspace(0, 1, W, device=device)
-        grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
+        # B, _, H, W = pred_norm.shape
 
-        coords = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)
+        # x = torch.linspace(0, 1, H, device=device)
+        # y = torch.linspace(0, 1, W, device=device)
+        # grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
 
+        # coords = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)
+
+        # # 2. Add a channel/batch dimension so they match [B, 1, H, W]
+        # x_coord = grid_x.unsqueeze(0).unsqueeze(0).repeat(B, 1, 1, 1).requires_grad_(True)
+        # y_coord = grid_y.unsqueeze(0).unsqueeze(0).repeat(B, 1, 1, 1).requires_grad_(True)
         residuals = phy_informer.forward(
             {
                 "u": u_phys,
                 "k": k_phys,
-                "coordinates": coords,
+                # "coordinates": coords,
+                # "x": x_coord,
+                # "y": y_coord
             }
         )
 
         pde_residual = residuals["diffusion_u"]
-        pde_residual = pde_residual[:, :, 2:-2, 2:-2]
-        loss_pde = torch.mean(torch.abs(pde_residual))
-        print(f"physics:{loss_pde}, data loss: {loss_data}")
-        physics_weight = cfg.physics.weight * 1/250
+
+        p = cfg.arch.padding
+        pde_residual_padded = pde_residual[:, :, p:-p, p:-p]
+
+        # # FIX: Dynamically detect how many boundary pixels were dropped by the informer
+        # diff_h = (u_phys.shape[2] - pde_residual.shape[2]) // 2
+        # diff_w = (u_phys.shape[3] - pde_residual.shape[3]) // 2
+
+        # # Slice safely based on what the physics engine actually produced
+        # if diff_h > 0 or diff_w > 0:
+        #     pde_residual_inner = pde_residual[:, :, diff_h:-diff_h, diff_w:-diff_w]
+        # else:
+        #     pde_residual_inner = pde_residual  # For Fourier, this branch executes (keeps full 128x128)
+        
+        loss_pde = F.l1_loss(pde_residual_padded, torch.zeros_like(pde_residual_padded))
+        # loss_pde = F.l1_loss(pde_residual_inner, torch.zeros_like(pde_residual_inner))
+        # pde_residual = pde_residual[:, :, 2:-2, 2:-2]
+        # loss_pde = torch.mean(torch.abs(pde_residual))
+
+        """
+            This checks if the provided solution has a low residual loss
+        """
+        sol_res = phy_informer.forward(
+            {
+                "u": denormalize(target_norm, u_mean, u_std),
+                "k": k_phys,
+                # "coordinates": coords,
+                # "x": x_coord,
+                # "y": y_coord
+            }
+        )
+        sol_pde = sol_res["diffusion_u"]
+        
+        sol_pde_padded = sol_pde[:, :, p:-p, p:-p]
+
+        # # FIX: Dynamically detect how many boundary pixels were dropped by the informer
+        # diff_h_s = (u_phys.shape[2] - sol_pde.shape[2]) // 2
+        # diff_w_s = (u_phys.shape[3] - sol_pde.shape[3]) // 2
+
+        # # Slice safely based on what the physics engine actually produced
+        # if diff_h_s > 0 or diff_w_s > 0:
+        #     pde_residual_inner_s = sol_pde[:, :, diff_h_s:-diff_h_s, diff_w_s:-diff_w_s]
+        # else:
+        #     pde_residual_inner_s = sol_pde  # For Fourier, this branch executes (keeps full 128x128)
+        
+        # sol_pde = sol_pde[:, :, 2:-2, 2:-2]
+        sol_loss_pde = F.l1_loss(sol_pde_padded, torch.zeros_like(sol_pde_padded))
+
+        """
+            end
+        """
+
+        """debug print statement"""
+        print(f"physics:{loss_pde}, data loss: {loss_data}, residual_loss: {loss_pde}, solution_pde loss: {sol_loss_pde}")
+
+
+        physics_weight = cfg.physics.weight * 1/cfg.training.resolution
         loss = loss_data + physics_weight * loss_pde
 
         return loss
@@ -290,6 +355,7 @@ def train_pino(cfg: DictConfig):
                         pred_phys,
                         i,  # Let GridValidator manage plotting internally via sample rank
                         logger,
+                        title=f'PINO_val_epoch_{pseudo_epoch}'
                     )
                     
                     # Safe cast handling for return objects

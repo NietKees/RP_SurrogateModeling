@@ -78,8 +78,11 @@ def validation_step(model, dataloader, epoch):
         return loss_epoch / len(dataloader)
 
 
-# @hydra.main(version_base="1.3", config_path=".", config_name="config_pino.yaml")
+@hydra.main(version_base="1.3", config_path="..", config_name="pipeline_config.yaml")
 def train_pino(cfg: DictConfig):
+
+    cfg = cfg.pino
+
     os.environ["RANK"] = "0"
     os.environ["WORLD_SIZE"] = "1"
     os.environ["MASTER_ADDR"] = "localhost"
@@ -117,7 +120,7 @@ def train_pino(cfg: DictConfig):
 
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.training.gamma)
     
-    dataloader, validator = get_darcy_setup(cfg)
+    dataloader, _ = get_darcy_setup(cfg)
 
     ckpt_args = {
         "path": f"./PINO/checkpoints",
@@ -127,7 +130,7 @@ def train_pino(cfg: DictConfig):
     }
     loaded_epoch = load_checkpoint(device=dist.device, **ckpt_args)
 
-    for epoch in range(max(1, loaded_epoch + 1), cfg.training.max_epochs + 1):
+    for epoch in range(max(1, loaded_epoch + 1), cfg.training.max_pseudo_epochs + 1):
         # wrap epoch in launch logger for console logs
         with LaunchLogger(
             "train",
@@ -167,15 +170,33 @@ def train_pino(cfg: DictConfig):
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
+                
+                #
+                #   Residual loss on truth
+                #
+                truth_residuals = phy_informer.forward(
+                    {
+                        "u": outvar,
+                        "k": invar[:, 0:1],
+                    }
+                )
+                t_pde_out_arr = truth_residuals["diffusion_u"]
+
+                t_pde_out_arr = F.pad(
+                    t_pde_out_arr[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0
+                )
+                t_loss_pde = F.l1_loss(t_pde_out_arr, torch.zeros_like(t_pde_out_arr))
+
+
                 log.log_minibatch(
-                    {"loss_data": loss_data.detach(), "loss_pde": loss_pde.detach()}
+                    {"loss_data": loss_data.detach(), "loss_pde": loss_pde.detach(), "true_loss": t_loss_pde}
                 )
 
             log.log_epoch({"Learning Rate": optimizer.param_groups[0]["lr"]})
 
-        with LaunchLogger("valid", epoch=epoch) as log:
-            error = validation_step(model, validator, epoch)
-            log.log_epoch({"Validation error": error})
+        # with LaunchLogger("valid", epoch=epoch) as log:
+            # error = validation_step(model, validator, epoch)
+            # log.log_epoch({"Validation error": error})
 
         # save_checkpoint(
         #     "./checkpoints",
@@ -189,5 +210,5 @@ def train_pino(cfg: DictConfig):
             save_checkpoint(**ckpt_args, epoch=epoch)
 
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    train_pino()

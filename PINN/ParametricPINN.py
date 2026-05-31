@@ -1,266 +1,210 @@
 import os
 import sys
-import random
 from math import ceil
-import numpy as np
+
 import torch
 import torch.nn as nn
-import hydra
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(current_dir, ".."))
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
 from physicsnemo.distributed import DistributedManager
-from physics_utils import get_physics_informer
-from data_utils import get_darcy_setup
+from physicsnemo.models.fno import FNO
+from physicsnemo.models.mlp.fully_connected import FullyConnected
 from physicsnemo.utils.logging import LaunchLogger, PythonLogger
-from physicsnemo.utils import save_checkpoint
+from physicsnemo.utils import (
+    StaticCaptureTraining,
+    StaticCaptureEvaluateNoGrad,
+    load_checkpoint,
+    save_checkpoint,
+)
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# Assumed data/physics utilities based on your setup
+from data_utils import get_darcy_setup
+from physics_utils import get_physics_informer
 
-# ==============================================================================
-# FIELD-AWARE P2INN ARCHITECTURE (MEMORY OPTIMIZED)
-# ==============================================================================
 
-class DarcyParameterEncoder(nn.Module):
-    def __init__(self, in_channels=1, embedding_dim=128):
+# ============================================================
+# P2INN Model Architecture
+# ============================================================
+
+class P2INN_Darcy(nn.Module):
+    def __init__(self, cfg):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 16, kernel_size=4, stride=2, padding=1),  # [B, 16, 32, 32]
+        
+        # 1. Parameter Encoder (g_p): Outputs a dense latent feature map
+        self.param_encoder = FNO(
+            in_channels=1, 
+            out_channels=128,           # Hardcoded latent dimension
+            num_fno_modes=[12, 12],     # Hardcoded modes for 2D Darcy (64x64 resolution)
+            num_fno_layers=4,           # Hardcoded FNO layers
+            padding=9,                  # Hardcoded padding
+            dimension=2,                # 2D problem
+            latent_channels=128         # FNO width
+        )
+        
+        # 2. Coordinate Encoder (Pure PyTorch MLP)
+        # Replaces FullyConnected: 2 in_features -> 3 layers -> 64 out_features
+        self.coord_encoder = nn.Sequential(
+            nn.Linear(2, 64),
             nn.SiLU(),
-            nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=1),         # [B, 32, 16, 16]
+            nn.Linear(64, 64),
             nn.SiLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),         # [B, 64, 8, 8]
-            nn.SiLU(),
-            nn.Flatten(),                                                  # [B, 4096]
-            nn.Linear(4096, 256),
-            nn.SiLU(),
-            nn.Linear(256, embedding_dim),
+            nn.Linear(64, 64),
             nn.SiLU()
         )
-
-    def forward(self, k_grid):
-        return self.net(k_grid)
-
-
-class DarcyP2INN_Layer(nn.Module):
-    def __init__(self, in_features, out_features, embedding_dim=128):
-        super().__init__()
-        self.linear = nn.Linear(in_features, out_features)
-        self.gain_layer = nn.Linear(embedding_dim, out_features)
-        self.bias_layer = nn.Linear(embedding_dim, out_features)
-        self.activation = nn.SiLU()
-
-    def forward(self, x, embedding):
-        x = self.linear(x)
-        gamma = self.gain_layer(embedding)
-        beta = self.bias_layer(embedding)
-        return self.activation(x * gamma + beta)
-
-
-class ParameterizedDarcyPINN(nn.Module):
-    def __init__(self, layers=6, hidden_dim=256, embedding_dim=128):
-        super().__init__()
-        self.param_encoder = DarcyParameterEncoder(in_channels=1, embedding_dim=embedding_dim)
         
-        self.in_layer = nn.Linear(2, hidden_dim)
-        self.activation = nn.SiLU()
-        
-        self.mid_layers = nn.ModuleList([
-            DarcyP2INN_Layer(hidden_dim, hidden_dim, embedding_dim) for _ in range(layers - 2)
-        ])
-        
-        self.out_layer = nn.Linear(hidden_dim, 1)
+        # 3. Manifold Decoder Network (Pure PyTorch MLP)
+        # Replaces FullyConnected: 128 (FNO) + 64 (Coord) = 192 in_features -> 4 layers -> 1 out_feature
+        self.manifold_net = nn.Sequential(
+            nn.Linear(192, 128),
+            nn.SiLU(),
+            nn.Linear(128, 128),
+            nn.SiLU(),
+            nn.Linear(128, 128),
+            nn.SiLU(),
+            nn.Linear(128, 1)           # Outputs single channel (Pressure u)
+        )
 
-    def forward(self, coords, embedding):
+    def forward(self, invars, coords):
         """
         Args:
-            coords: Tensor of shape [Total_Points, 2]
-            embedding: Tensor of shape [Total_Points, Embedding_Dim] (already expanded)
+            invars: Permeability field tensor [B, 1, H, W]
+            coords: Query physical coordinates tensor [B, 2, H, W]
         """
-        x = self.activation(self.in_layer(coords))
-        for layer in self.mid_layers:
-            x = layer(x, embedding)
-        return self.out_layer(x)
+        B, _, H, W = invars.shape
+        
+        # Step 1: Extract continuous feature map via FNO
+        # Output shape: [B, latent_channels, H, W]
+        h_param_field = self.param_encoder(invars)
+        
+        # Step 2: Sample and align features spatially
+        # Instead of global pooling, we preserve localized parameters. 
+        # For a structured grid, we can directly permute or use grid_sample for meshless queries.
+        h_param_flat = h_param_field.permute(0, 2, 3, 1).reshape(B * H * W, -1)
+        
+        # Step 3: Process coordinate maps
+        # Reshape coords to [B*H*W, 2] for the fully connected architecture
+        coords_flat = coords.permute(0, 2, 3, 1).reshape(B * H * W, -1)
+        h_coord_flat = self.coord_encoder(coords_flat)
+        
+        # Step 4: Concatenate and decode point-wise
+        h_concat = torch.cat([h_coord_flat, h_param_flat], dim=-1)
+        pred_flat = self.manifold_net(h_concat)
+        
+        # Step 5: Reconstruction back to standard PhysicsNeMo grid shapes [B, C, H, W]
+        pred_grid = pred_flat.view(B, H, W, -1).permute(0, 3, 1, 2)
+        
+        return pred_grid
 
 
-def set_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+# ============================================================
+# Normalization Utilities
+# ============================================================
+
+def denormalize(x, mean, std):
+    return x * std + mean
 
 
-# ==============================================================================
-# MAIN TRAINING SEQUENCE LOOP
-# ==============================================================================
+# ============================================================
+# Main Physics-Informed Training Implementation
+# ============================================================
 
-@hydra.main(version_base="1.3", config_path=".", config_name="Darcy_PINN_config")
-def train_p2inn(cfg: DictConfig) -> None:
+def train_p2inn(cfg: DictConfig):
     os.environ["RANK"] = "0"
     os.environ["WORLD_SIZE"] = "1"
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
-
+    # Distributed Environment Setup
     DistributedManager.initialize()
     dist = DistributedManager()
     device = dist.device
-    
-    set_seed(cfg.get("seed", 42))
-    
-    log = PythonLogger(name="p2inn_darcy_native")
-    log.file_logging()
+
+    log = PythonLogger(name="p2inn_darcy")
     LaunchLogger.initialize()
 
-    print(f"--- Starting Native Spatial P2INN Training on {device} ---")
-    os.makedirs("./P2INN/checkpoints", exist_ok=True)
+    # Normalization metrics
+    k_mean, k_std = cfg.normaliser.permeability.mean, cfg.normaliser.permeability.std_dev
+    u_mean, u_std = cfg.normaliser.darcy.mean, cfg.normaliser.darcy.std_dev
 
-    physicsInformer = get_physics_informer(device, 'darcy', method="autodiff")
-    dataloader, validator = get_darcy_setup(cfg)
-    dataloader_iter = iter(dataloader)
-
-    k_mean, k_std = 1.25, 0.75
-    u_mean, u_std = 4.52e-2, 2.79e-2
-
-    model = ParameterizedDarcyPINN(
-        layers=cfg.arch.layers, 
-        hidden_dim=cfg.arch.layer_size,
-        embedding_dim=128
-    ).to(device)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.scheduler.initial_lr)
+    # Model Instantiation
+    model = P2INN_Darcy(cfg).to(device)
+    
+    # Physics Informer
+    phy_informer = get_physics_informer(device=device, equation=cfg.equation)
+    
+    # Optimizer & Scheduler
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.start_lr)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.training.gamma)
     
-    ckpt_args = {
-        "path": "./P2INN/checkpoints",
-        "models": model,
-        "optimizer": optimizer,
-        "scheduler": scheduler,
-    }
+    # Setup Dataloader and Validation Engines via NeMo structures
+    dataloader, validator = get_darcy_setup(cfg)
+    
+    steps_per_epoch = ceil(cfg.training.pseudo_epoch_sample_size / cfg.training.batch_size)
 
-    validation_iters = ceil(cfg.validation.sample_size / cfg.training.batch_size)
-    current_val_error = float('inf')
-    epoch = 1
-
-    while epoch < cfg.training.max_epochs + 1 and current_val_error >= cfg.training.target_error_threshold:
-        model.train()
-        optimizer.zero_grad()
+    # ========================================================
+    # STATIC CAPTURE TRAINING GRAPH
+    # ========================================================
+    @StaticCaptureTraining(
+        model=model,
+        optim=optimizer,
+        logger=log,
+        use_amp=False,
+        use_graphs=False, # Set to True if shapes are perfectly static across iterations
+    )
+    def forward_train(invars_norm, coords):
+        # 1. Forward Pass maintaining structured matrix footprints
+        pred_norm = model(invars_norm, coords)
         
-        try:
-            batch = next(dataloader_iter)
-        except StopIteration:
-            dataloader_iter = iter(dataloader)
-            batch = next(dataloader_iter)
-            
-        perm = batch["permeability"].to(device) # [B, 1, H, W]
-        B, C, H, W = perm.shape
+        # 2. Re-scale to physical domain
+        k_phys = denormalize(invars_norm[:, 0:1], k_mean, k_std)
+        u_phys = denormalize(pred_norm, u_mean, u_std)
 
-        # 1. Compute latent map embeddings exactly once per unique field
-        base_embeddings = model.param_encoder(perm) # [B, 128]
-
-        # 2. Reconstruct spatial coordinate point clouds
-        x = torch.linspace(0, 1, H, device=device)
-        y = torch.linspace(0, 1, W, device=device)
-        grid_x, grid_y = torch.meshgrid(x, y, indexing='ij')
-        coords_all = torch.stack([grid_x, grid_y], dim=-1).repeat(B, 1, 1, 1) # [B, H, W, 2]
-
-        # Flatten structural components for routing
-        coords_flat = coords_all.view(-1, 2)
-        k_flat_norm = perm.permute(0, 2, 3, 1).reshape(-1, 1)
-        
-        # Expand the pre-computed embeddings across the spatial mesh instances [B * H * W, 128]
-        embeddings_flat = base_embeddings.unsqueeze(1).unsqueeze(2).repeat(1, H, W, 1).view(-1, 128)
-
-        # 3. Extract random interior domain collocation points
-        num_samples = cfg.training.num_collocation_points
-        idx = torch.randperm(coords_flat.size(0), device=device)[:num_samples]
-        
-        sampled_coords = coords_flat[idx].clone().detach().requires_grad_(True)
-        sampled_k_norm = k_flat_norm[idx].clone().detach().requires_grad_(True)
-        sampled_embeddings = embeddings_flat[idx]
-
-        # Domain interior prediction evaluation
-        u_norm = model(sampled_coords, sampled_embeddings)
-        u_phys = u_norm * u_std + u_mean
-        k_phys = sampled_k_norm * k_std + k_mean
-
-        residuals = physicsInformer.forward(
-            {"coordinates": sampled_coords, "u": u_phys, "k": k_phys}
+        # 3. Physics Residual calculation using standard grid shapes
+        residuals = phy_informer.forward(
+            {
+                "u": u_phys,
+                "k": k_phys,
+                "coordinates": coords,
+            }
         )
-        pde_key = list(residuals.keys())[0]
-        loss_pde = torch.mean(torch.square(residuals[pde_key]))
 
-        # 4. Extract boundary coordinate metrics safely 
-        bc_mask = torch.zeros((H, W), dtype=torch.bool, device=device)
-        bc_mask[0, :] = True; bc_mask[-1, :] = True; bc_mask[:, 0] = True; bc_mask[:, -1] = True
-        bc_mask_expanded = bc_mask.repeat(B, 1, 1).view(-1)
+        pde_residual = residuals["diffusion_u"]
+        # Standard boundary trim for stable stencil computation
+        pde_residual = pde_residual[:, :, 2:-2, 2:-2] 
+        
+        loss_pde = torch.mean(torch.square(pde_residual))
+        return loss_pde
 
-        bc_coords = coords_flat[bc_mask_expanded]
-        bc_embeddings = embeddings_flat[bc_mask_expanded]
-
-        u_bc_norm = model(bc_coords, bc_embeddings)
-        u_bc_phys = u_bc_norm * u_std + u_mean
-        loss_bc = torch.mean(torch.square(u_bc_phys))
-
-        # 5. Optimize weights
-        loss = (cfg.physics.pde_weight * loss_pde) + (cfg.physics.bc_weight * loss_bc)
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch} | Loss: {loss.item():.6e} | PDE: {loss_pde.item():.4e} | BC: {loss_bc.item():.4e}")
-
-        if epoch % cfg.training.checkpoint_freq == 0:
-            save_checkpoint(**ckpt_args, epoch=epoch)
-
-        # ======================================================================
-        # VALIDATION MODULE (MEMORY SAFE)
-        # ======================================================================
-        if epoch % cfg.validation.validation_pseudo_epochs == 0:
-            model.eval()
-            with LaunchLogger("P2INN_Valid", epoch=epoch) as logger:
-                total_error = 0.0
+    # ========================================================
+    # TRAINING LOOP
+    # ========================================================
+    log.success("Starting Physics-Compliant P2INN training...")
+    
+    for epoch in range(1, cfg.training.max_pseudo_epochs + 1):
+        running_loss = 0.0
+        
+        with LaunchLogger("train", epoch=epoch, num_mini_batch=steps_per_epoch) as logger:
+            for _, batch in zip(range(steps_per_epoch), dataloader):
                 
-                for i, batch in zip(range(validation_iters), dataloader):
-                    invar = batch["permeability"].to(device)  # [B, 1, H, W]
-                    target = batch["darcy"].to(device)        # [B, 1, H, W]
-                    val_B, _, val_H, val_W = invar.shape
-                    
-                    x_test = torch.linspace(0, 1, val_H, device=device)
-                    y_test = torch.linspace(0, 1, val_W, device=device)
-                    grid_x_t, grid_y_t = torch.meshgrid(x_test, y_test, indexing='ij')
-                    coords_all_t = torch.stack([grid_x_t, grid_y_t], dim=-1).repeat(val_B, 1, 1, 1).view(-1, 2)
-                    
-                    with torch.no_grad():
-                        # Run the encoder once per map in the validation batch
-                        val_embeddings_base = model.param_encoder(invar) # [B, 128]
-                        val_embeddings_flat = val_embeddings_base.unsqueeze(1).unsqueeze(2).repeat(1, val_H, val_W, 1).view(-1, 128)
-                        
-                        # Forward pass over the lightweight tensor
-                        pred_flat = model(coords_all_t, val_embeddings_flat)
-                        pred = pred_flat.view(val_B, val_H, val_W, 1).permute(0, 3, 1, 2)
+                # Extract inputs
+                invars = batch["permeability"].to(device) # [B, 1, H, W]
+                B, _, H, W = invars.shape
+                
+                # Construct coordinate mesh in [B, 2, H, W] shape layout for NeMo tools
+                x = torch.linspace(0, 1, H, device=device)
+                y = torch.linspace(0, 1, W, device=device)
+                grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
+                coords = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)
 
-                    loss_val = validator.compare(
-                        invar, target, pred, 
-                        step=i, logger=logger, 
-                        title=f'validation_{epoch} P2INN'
-                    )
-                    total_error += float(loss_val.detach().cpu().item())
-
-                current_val_error = total_error / validation_iters
-                logger.log_epoch({"relative_l2_physical": current_val_error})
-                print(f"--- Epoch {epoch} | Validation Relative L2 Error: {current_val_error:.6f} ---")
-        epoch += 1
-                  
-    save_checkpoint(**ckpt_args, epoch=epoch - 1)
-    log.success("P2INN spatial grid training execution sequence completed successfully.")
-
-
-if __name__ == "__main__":
-    train_p2inn()
+                # Execute static training pass
+                loss = forward_train(invars, coords)
+                
+                loss_val = float(loss.detach().cpu())
+                running_loss += loss_val
+                logger.log_minibatch({"loss": loss_val})
+                
+            logger.log_epoch({"avg_train_loss": running_loss / steps_per_epoch})
+            
+        scheduler.step()
+        
+    return model

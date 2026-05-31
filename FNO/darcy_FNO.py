@@ -171,6 +171,7 @@ def fno_trainer(cfg: DictConfig) -> None:
                         forward_eval(batch["permeability"]),
                         pseudo_epoch,
                         logger,
+                        title=f'FNO_val_epoch_{pseudo_epoch}'
                     )
                     total_loss += val_loss
                 logger.log_epoch({"Validation error": total_loss / validation_iters})
@@ -178,13 +179,15 @@ def fno_trainer(cfg: DictConfig) -> None:
         # update learning rate
         # if pseudo_epoch % cfg.scheduler.decay_pseudo_epochs == 0:
         scheduler.step()
-        if pseudo_epoch % 10 == 0:
-            save_path = os.path.join('checkpoints', f"fno_checkpoint_{pseudo_epoch}.pt")
-            torch.save(model.state_dict(), save_path)
+        if pseudo_epoch % cfg.training.rec_results_freq == 0:
+            # save_path = os.path.join('checkpoints', f"fno_checkpoint_{pseudo_epoch}.pt")
+            save_checkpoint(**ckpt_args, epoch=pseudo_epoch)
+            log.success(f"Checkpoint saved at epoch {pseudo_epoch}")
+            # torch.save(model.state_dict(), save_path)
         
         pseudo_epoch += 1
 
-    save_checkpoint(**ckpt_args, epoch=cfg.training.max_pseudo_epochs)
+    save_checkpoint(**ckpt_args, epoch=pseudo_epoch)
     log.success("Training completed *yay*")
 
 

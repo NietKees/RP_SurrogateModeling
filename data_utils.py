@@ -1,9 +1,19 @@
 import torch
 from torch.nn import MSELoss
+from torch.utils.data import Dataset, DataLoader
 from physicsnemo.datapipes.benchmarks.darcy import Darcy2D
+import os
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+
 from validator import GridValidator
 from physicsnemo.utils.logging import LaunchLogger
 import torch.nn.functional as F
+from Burgers.generator import get_burgers_batch
 
 def get_darcy_setup(cfg=None, resolution=64, batch_size=32):
     """
@@ -44,6 +54,44 @@ def get_darcy_setup(cfg=None, resolution=64, batch_size=32):
     )
     return dataloader, validator
 
+def get_burgers_setup(cfg):
+    """Factory function creating the DataLoader and GridValidator for Burgers 1D+Time."""
+    
+    # Extract structural configuration properties from Hydra DictConfig safely
+    nx = getattr(cfg.training, "nx", 256)
+    nt = getattr(cfg.training, "nt", 100)
+    nu = getattr(cfg.physics, "nu", 0.05)
+    tmax = getattr(cfg.physics, "tmax", 1.0)
+    
+    batch_size = cfg.training.batch_size
+    num_samples = getattr(cfg.training, "pseudo_epoch_sample_size", 1000)
+
+    # Instantiate the standard training dataset
+    dataset = get_burgers_batch(num_samples, nx, nt, nu, tmax)
+    validation_dataset = get_burgers_batch(cfg.validation.sample_size, nx, nt, nu, tmax)
+
+    print(f'Generated a dataset of:')
+    print(f'nx={nx}, nt={nt}, nu={nu}, tmax={tmax}, batchsize={batch_size}, num_samples={num_samples}, datasetlength={len(dataset)}, validationlenght={len(validation_dataset)}')
+    # Build the DataLoader wrapper
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=True
+    )
+
+    validation_dataloader = DataLoader(
+        validation_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=True
+    )
+
+    # Initialize your visualization/error grid tracker
+    validator = GridValidator(loss_fun=RelativeL2Loss())
+
+    return dataloader, validation_dataloader, validator
+
 def prepare_pinn_data(batch, device):
     """Converts grid data to point-wise data for MLP/PINNs"""
     perm = batch["permeability"].to(device)
@@ -76,77 +124,5 @@ class RelativeL2Loss(torch.nn.Module):
         rel_l2 = diff_norm / (target_norm + self.eps)
 
         return rel_l2.mean()
-
-# def run_training_loop(model, dataloader, optimizer, scheduler, cfg, device, phy_informer=None):
-    # """
-    # If phy_informer is None, this acts as standard FNO training.
-    # If phy_informer is provided, it acts as PINO training.
-    # """
-    # for epoch in range(cfg.max_epochs):
-    #     with LaunchLogger("train", epoch=epoch) as log:
-    #         for batch in dataloader:
-    #             optimizer.zero_grad()
-    #             invar, target = batch["permeability"].to(device), batch["darcy"].to(device)
-
-    #             # 1. Prediction & Data Loss
-    #             pred = model(invar)
-    #             loss_data = F.mse_loss(pred, target)
-
-    #             # 2. Physics Loss (The PINO "Toggle")
-    #             if phy_informer is not None:
-    #                 # Compute PDE residuals
-    #                 res = phy_informer.forward({"u": pred, "k": invar[:, 0:1]})
-    #                 pde_res = res["diffusion_u"]
-                    
-    #                 # Apply the same padding logic you used before
-    #                 pde_res = F.pad(pde_res[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0)
-    #                 loss_pde = F.mse_loss(pde_res, torch.zeros_like(pde_res))
-                    
-    #                 # Total Loss
-    #                 loss = loss_data + (cfg.physics_weight * loss_pde)
-    #             else:
-    #                 loss = loss_data
-
-    #             loss.backward()
-    #             optimizer.step()
-    #     scheduler.step()
-    # return model
-"""--------------------------------------------------"""
-# import torch
-# import h5py
-# from torch.utils.data import Dataset, DataLoader
-
-# class PDEBenchDarcyDataset(Dataset):
-#     def __init__(self, file_path, transform=None):
-#         self.file_path = file_path
-#         # Open once to get the length
-#         with h5py.File(self.file_path, 'r') as f:
-#             self.len = f['tensor'].shape[0]
-
-#     def __len__(self):
-#         return self.len
-
-#     def __getitem__(self, idx):
-#         # We open the file inside __getitem__ to make it compatible 
-#         # with DataLoader multiprocessing (num_workers > 0)
-#         with h5py.File(self.file_path, 'r') as f:
-#             # PDEBench: (batch, x, y, 1) -> FNO: (1, x, y)
-#             permeability = torch.from_numpy(f['nu'][idx]).permute(2, 0, 1).float()
-#             darcy_field = torch.from_numpy(f['tensor'][idx]).permute(2, 0, 1).float()
-            
-#         # Normalization (using your values)
-#         permeability = (permeability - 1.25) / 0.75
-#         darcy_field = (darcy_field - 4.52e-2) / 2.79e-2
-        
-#         return {"permeability": permeability, "darcy": darcy_field}
-
-# def get_darcy_loader(file_path, batch_size=32, shuffle=True, num_workers=4):
-    # dataset = PDEBenchDarcyDataset(file_path)
-    # loader = DataLoader(
-    #     dataset, 
-    #     batch_size=batch_size, 
-    #     shuffle=shuffle, 
-    #     num_workers=num_workers,
-    #     pin_memory=True  # Speeds up host-to-device transfer
-    # )
-    # return loader
+    
+    

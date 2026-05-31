@@ -1,12 +1,12 @@
 # Global Settings - Shared by all models
 equation: "darcy"
-resolution: 64
+resolution: 128
 test_samples: 32
 
 # Phase Toggles
-do_fno: False
-do_pinn: True
-do_pino: False
+do_fno: True
+do_pinn: False
+do_pino: True
 
 # Normalizer values must be identical for all models to compare them fairly
 normaliser:
@@ -25,15 +25,15 @@ fno_shared_arch:
   dimension: 2
   latent_channels: 64
   num_fno_layers: 4
-  num_fno_modes: 32
-  padding: 9
+  num_fno_modes: 64
+  padding: 8
   decoder_layers: 1
   decoder_layer_size: 32 # 64
   out_features: 1
 
 training:
-    target_error_threshold: 0.005
-    resolution: 64
+    target_error_threshold: 0.01
+    resolution: 128
     batch_size: 64
     rec_results_freq : 8
     max_pseudo_epochs: 256
@@ -59,7 +59,7 @@ fno:
     sample_size: 256
     validation_pseudo_epochs: 4
   scheduler:
-    initial_lr: 1.E-3
+    initial_lr: 5.E-4
     decay_rate: .85
     decay_pseudo_epochs: 8
 
@@ -67,13 +67,13 @@ fno:
 pinn:
   equation: ${equation}
   normaliser: ${normaliser}
+  # training: ${training}
   parameters:
     num_params: 2
     ranges:
       permeability_scale: [0.1, 5.0]
       source_strength: [0.1, 10.0]
   arch:
-    arch:
     latent_dim: 32
     hidden_dim: 128
     num_layers: 4
@@ -116,12 +116,12 @@ pino:
   training: ${training}
   physics:
     weight: 0.1
-    grad_method: "funtion_wise" # "finite_difference" #TODO try funtion_wise -> supposed to be faster and more stable or fourier
+    grad_method: "finite_difference" # "spectral" #TODO try function_wise -> supposed to be faster and more stable or fourier
   validation:
       sample_size: 256
       validation_pseudo_epochs: 4
   scheduler:
-    initial_lr: 1.E-3
+    initial_lr: 5.E-4
     decay_rate: .85
     decay_pseudo_epochs: 8
 
@@ -138,7 +138,7 @@ pifno:
     max_pseudo_epochs: 512 # Increased: Zero-data needs more time to find the manifold [4]
     start_lr: 1e-3         # Higher initial LR to "kickstart" the physics discovery
     pseudo_epoch_sample_size: 2048
-    target_error_threshold: 0.005
+    target_error_threshold: 0.01
     rec_results_freq : 8
     gamma: 0.985 # 0.9994
 
@@ -150,7 +150,7 @@ pifno:
     grad_method: "function_wise" # MANDATORY for spectral stability [5, 12]
   
   scheduler:
-    initial_lr: 1e-3
+    initial_lr: 5e-4
     decay_rate: 0.5
     decay_pseudo_epochs: 8 # Decay every 100 epochs as per original FNO paper [13, 14]
   validation:

@@ -174,49 +174,72 @@ def train_pifno(cfg: DictConfig):
     def forward_train(invars_norm, target_norm):
 
         pred_norm = model(invars_norm)
-
-        # 2. Hard-code the boundary conditions directly on the model prediction
-        # This keeps the ranges anchored and prevents edge leaks!
-
-        bc_mask = torch.ones_like(pred_norm)
-        bc_mask[:, :, 0, :] = 0.0   # Top
-        bc_mask[:, :, -1, :] = 0.0  # Bottom
-        bc_mask[:, :, :, 0] = 0.0   # Left
-        bc_mask[:, :, :, -1] = 0.0  # Right
-        pred_norm = pred_norm * bc_mask
-
         loss_data = F.mse_loss(pred_norm, target_norm)
 
         k_phys = denormalize(invars_norm[:, 0:1], k_mean, k_std)
         u_phys = denormalize(pred_norm, u_mean, u_std)
 
         B, _, H, W = u_phys.shape
-        x = torch.linspace(0, 1, H, device=device)
-        y = torch.linspace(0, 1, W, device=device)
-        grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
+        # B, _, H, W = pred_norm.shape
 
-        coords = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)
+        # dx = 1.0 / (H + 1)
 
-        # Run physics directly on normalized tensors
+        # # Generate coordinates matching the specific spatial steps of the solver
+        # x = torch.arange(0, H, device=device) * dx
+        # y = torch.arange(0, W, device=device) * dx
+        # grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
+
+        # coords = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0).repeat(B, 1, 1, 1)
+
         residuals = phy_informer.forward(
             {
-                "u": pred_norm,             # Normalized
-                "k": invars_norm[:, 0:1],    # Normalized
-                "coordinates": coords,
+                "u": u_phys,
+                "k": k_phys,
+                # "coordinates": coords,
             }
         )
 
         pde_residual = residuals["diffusion_u"]
-        pde_residual = pde_residual[:, :, 2:-2, 2:-2]
-        
-        # Absolute MSE loss (Textbook style)
-        loss_pde = torch.mean(torch.square(pde_residual))
-        
-        physics_weight = cfg.physics.weight
-        loss = physics_weight * loss_pde # +loss_data
 
-        loss = (physics_weight * loss_pde) # + (bc_weight * loss_bc)
-        print(f"physics:{loss_pde * physics_weight}, data loss: {loss_data}")
+        # pde_residual_padded = F.pad(
+        #     pde_residual[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0
+        # )
+        p = cfg.arch.padding
+        pde_residual_padded = pde_residual[:, :, p:-p, p:-p]
+
+        loss_pde = F.l1_loss(pde_residual_padded, torch.zeros_like(pde_residual_padded))
+        # pde_residual = pde_residual[:, :, 2:-2, 2:-2]
+        # loss_pde = torch.mean(torch.abs(pde_residual))
+
+        """
+            This checks if the provided solution has a low residual loss
+        """
+        sol_res = phy_informer.forward(
+            {
+                "u": denormalize(target_norm, u_mean, u_std),
+                "k": k_phys,
+                # "coordinates": coords,
+            }
+        )
+        sol_pde = sol_res["diffusion_u"]
+        # sol_pde_padded = F.pad(
+        #     sol_pde[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0
+        # )
+        sol_pde_padded = sol_pde[:, :, p:-p, p:-p]
+        
+        # sol_pde = sol_pde[:, :, 2:-2, 2:-2]
+        sol_loss_pde = F.l1_loss(sol_pde_padded, torch.zeros_like(sol_pde_padded))
+
+        """
+            end
+        """
+
+        """debug print statement"""
+        print(f"data loss: {loss_data}, physics:{loss_pde}, solution_pde loss: {sol_loss_pde}")
+
+
+        physics_weight = cfg.physics.weight * 1/cfg.training.resolution
+        loss = 0 * loss_data + physics_weight * loss_pde
 
         return loss
 

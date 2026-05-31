@@ -64,8 +64,13 @@ def validation_step(model, dataloader, epoch):
         return loss_epoch / len(dataloader)
 
 
-# @hydra.main(version_base="1.3", config_path=".", config_name="config_pino.yaml")
+@hydra.main(version_base="1.3", config_path="..", config_name="pipeline_config.yaml")
 def train_pino(cfg: DictConfig):
+    # if cfg and hasattr(cfg, 'pino'):
+    try:
+        cfg = cfg.pino
+    except:
+        print('no pino found in config')
     os.environ["RANK"] = "0"
     os.environ["WORLD_SIZE"] = "1"
     os.environ["MASTER_ADDR"] = "localhost"
@@ -244,3 +249,7 @@ def train_pino(cfg: DictConfig):
 
     save_checkpoint(**ckpt_args, epoch=cfg.training.max_pseudo_epochs)
     log.success("Training completed *yay*")
+
+
+if __name__ == "__main__":
+    train_pino()

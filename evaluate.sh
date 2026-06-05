@@ -11,10 +11,14 @@
 cd /scratch/$USER/physicsnemo
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+apptainer exec --nv physicsnemo_26.03.sif \
+python PINN/burgers_PPINO.py
 
+apptainer exec --nv physicsnemo_26.03.sif \
+python Burger_evaluate.py
 # apptainer exec --nv physicsnemo_26.03.sif \
 # python train.py
 
 
-apptainer exec --nv physicsnemo_26.03.sif \
-python evaluate.py
+# apptainer exec --nv physicsnemo_26.03.sif \
+# python evaluate.py

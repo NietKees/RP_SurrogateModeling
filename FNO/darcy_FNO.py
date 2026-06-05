@@ -171,7 +171,7 @@ def fno_trainer(cfg: DictConfig) -> None:
                         forward_eval(batch["permeability"]),
                         pseudo_epoch,
                         logger,
-                        title=f'FNO_val_epoch_{pseudo_epoch}'
+                        title=f'Darcy_FNO/FNO_val_epoch_{pseudo_epoch}'
                     )
                     total_loss += val_loss
                 logger.log_epoch({"Validation error": total_loss / validation_iters})

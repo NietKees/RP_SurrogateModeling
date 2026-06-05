@@ -45,9 +45,10 @@ def normalize(x, mean, std):
 # ============================================================
 # Main Training
 # ============================================================
-
+@hydra.main(version_base="1.3", config_path="..", config_name="pipeline_config.yaml")
 def train_pino(cfg: DictConfig):
-
+    if cfg and hasattr(cfg, 'pino'):
+        cfg = cfg.pino
     # --------------------------------------------------------
     # Distributed setup
     # --------------------------------------------------------
@@ -181,6 +182,8 @@ def train_pino(cfg: DictConfig):
         k_phys = denormalize(invars_norm[:, 0:1], k_mean, k_std)
         u_phys = denormalize(pred_norm, u_mean, u_std)
 
+        # k_phys = invars_norm[:, 0:1] 
+        # u_phys = pred_norm
         # u_phys = u_phys.requires_grad_(True)
         # k_phys = k_phys.requires_grad_(True)
 
@@ -260,6 +263,20 @@ def train_pino(cfg: DictConfig):
         """
 
         """debug print statement"""
+
+        # print("\n" + "="*50)
+        # print("=== PINO PHYSICS DETAILED DEBUGGING ===")
+        # print(f"Input Scale  | u_norm min/max: {u_phys.min().item():.4f} / {u_phys.max().item():.4f}")
+        # print(f"Input Scale  | k_norm min/max: {k_phys.min().item():.4f} / {k_phys.max().item():.4f}")
+        # print("-" * 50)
+        # print(f"Residual Box | Raw PDE Residual mean magnitude: {torch.mean(torch.abs(pde_residual)).item():.6f}")
+        # print(f"Residual Box | Padded PDE Residual mean magnitude: {torch.mean(torch.abs(pde_residual_padded)).item():.6f}")
+        # print("-" * 50)
+        # print(f"FINAL LOSSES | Data (MSE): {loss_data.item():.6f}")
+        # print(f"FINAL LOSSES | Model Physics (L1): {loss_pde.item():.6f}")
+        # print(f"FINAL LOSSES | Ground-Truth Solution Physics (L1): {sol_loss_pde.item():.6f}")
+        # print("="*50 + "\n")
+
         print(f"physics:{loss_pde}, data loss: {loss_data}, residual_loss: {loss_pde}, solution_pde loss: {sol_loss_pde}")
 
 
@@ -355,7 +372,7 @@ def train_pino(cfg: DictConfig):
                         pred_phys,
                         i,  # Let GridValidator manage plotting internally via sample rank
                         logger,
-                        title=f'PINO_val_epoch_{pseudo_epoch}'
+                        title=f'Darcy_PINO/PINO_val_epoch_{pseudo_epoch}'
                     )
                     
                     # Safe cast handling for return objects
@@ -394,3 +411,7 @@ def train_pino(cfg: DictConfig):
 
     save_checkpoint(**ckpt_args, epoch=pseudo_epoch - 1)
     log.success(f"PINO training complete. Final error achieved: {current_val_error:.5f}")
+
+
+if __name__ == "__main__":
+    train_pino()

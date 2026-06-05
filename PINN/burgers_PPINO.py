@@ -15,6 +15,7 @@ from math import ceil
 import torch
 from torch.nn import MSELoss
 from torch.optim import Adam
+import numpy as np
 
 from physicsnemo.models.fno import FNO
 from physicsnemo.distributed import DistributedManager
@@ -31,7 +32,9 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
     
     The FNO handles the problem by evaluating inputs shaped as (B, in_channels, S, T) 
     and outputting the full field predictions matching the target space-time configuration.
-    """
+    """    
+    
+
     container = OmegaConf.to_container(cfg, resolve=True)
     cfg = OmegaConf.create(container)
     if cfg and hasattr(cfg, 'pino'):
@@ -47,7 +50,7 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
     device = dist.device
 
     # Initialize monitoring logs
-    log = PythonLogger(name="burgers_fno")
+    log = PythonLogger(name="burgers_pino")
     log.file_logging()
     LaunchLogger.initialize()  
 
@@ -74,7 +77,7 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
     dataloader, validation_dataloader, validator = get_burgers_setup(cfg)
     
     ckpt_args = {
-        "path": f"./FNO/Burger_checkpoints",
+        "path": f"./PINN/Burger_checkpoints",
         "optimizer": optimizer,
         "scheduler": scheduler,
         "models": model,
@@ -96,7 +99,7 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
     nu = getattr(cfg.physics, "nu", 0.01)
     tmax = getattr(cfg.physics, "tmax", 1.0)
     
-    dx = (2.0 * 3.141592653589793) / nx
+    dx = (2.0 * np.pi) / nx
     dt = tmax / (nt - 1)
     # ========================================================
     # TRAINING STEP
@@ -116,13 +119,17 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
         
         # 2. Physics-Informed Unsupervised Residual Loss
         # pde_residual = burgers_physics_residual(pred, nu, dx, dt)
-        # loss_pde = F.mse_loss(pde_residual, torch.zeros_like(pde_residual))
-        
+        pde_residual = burgers_physics_residual(pred, nu=cfg.training.nu, dx_val=dx, dt_val=dt)
+        loss_pde = F.mse_loss(pde_residual, torch.zeros_like(pde_residual))
+
+        sol_pde_residual = burgers_physics_residual(target, nu=cfg.training.nu, dx_val=dx, dt_val=dt)
+        sol_loss = F.mse_loss(sol_pde_residual, torch.zeros_like(sol_pde_residual))
+
         # Combine Loss using weight scales from configurations
-        # physics_weight = getattr(cfg.physics, "weight", 1.0)
-        
+        physics_weight = getattr(cfg.physics, "weight", 0.1) * 1/nx
+        print(f'data loss: {loss_data},residual loss:{loss_pde}, real_residual_loss: {sol_loss}')
         # Total combined optimization target
-        loss = loss_data #+  physics_weight * loss_pde
+        loss = 0 * loss_data +  1/nx * loss_pde
         return loss
 
     # ========================================================
@@ -137,7 +144,7 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
         return model(invars)
 
     if loaded_pseudo_epoch == 0:
-        log.success("Burgers FNO Training started...")
+        log.success("Burgers PINO Training started...")
     else:
         log.warning(f"Resuming training from pseudo epoch {loaded_pseudo_epoch + 1}.")
     
@@ -181,7 +188,7 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
                         pred_out,
                         pseudo_epoch,
                         logger,
-                        title=f'Burgers_FNO/Burgers_FNO_val_epoch_{pseudo_epoch}'
+                        title=f'Burgers_PPINO_val_epoch_{pseudo_epoch}'
                     )
                     total_loss += val_loss
                     
@@ -192,7 +199,7 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
         pseudo_epoch += 1
 
     save_checkpoint(**ckpt_args, epoch=cfg.training.max_pseudo_epochs + 1)
-    log.success("Burgers FNO Training completed successfully!")
+    log.success("Burgers PINO Training completed successfully!")
 
 
 if __name__ == "__main__":

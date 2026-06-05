@@ -127,9 +127,9 @@ def get_burgers_batch(
         seed=None,
         ):
     dataset = []
-
+    errors = {}
     for i in range(num_samples):
-        nu = 10 ** np.random.uniform(-3, -1)
+        # nu = 10 ** np.random.uniform(-3, -1)
         success = False
         while success == False:
             try:
@@ -145,7 +145,8 @@ def get_burgers_batch(
                 )
                 success = True
             except Exception as e:
-                print(e)
+                # print(e)
+                errors[str(e)] = errors.get(str(e), 0) + 1
                 continue
             dataset.append(
                 {
@@ -154,6 +155,15 @@ def get_burgers_batch(
                     "nu": nu,
                 }
             )
+    if errors:
+        print("\n--- Generation Errors Summary ---")
+        total_amount_of_errors = 0
+        for error_type, count in errors.items():
+            total_amount_of_errors += count
+            print(f"Count: {count} | Error: {error_type}")
+        print(f"\n--- {total_amount_of_errors}/{num_samples + total_amount_of_errors} failed ({(total_amount_of_errors/(num_samples + total_amount_of_errors))*100}%)---")
+
+        
     dataset = BurgersTorchDataset(dataset)
     return dataset
 
@@ -181,23 +191,54 @@ def dxx(u, dx):
 
 
 def burgers_physics_residual(u_pred, nu, dx_val, dt_val):
-    """
-    u_pred: (B, T, X)
-    nu: scalar or (B, 1, 1)
-    """
+    u = u_pred
+    dt = dt_val
+    dx = dx_val
+    u_x = (torch.roll(u, shifts=-1, dims=1) - torch.roll(u, shifts=1, dims=1)) / (
+        2.0 * dx
+    )
 
-    # time derivative
-    u_t = (u_pred[:, 1:, :] - u_pred[:, :-1, :]) / dt_val
+    # Central difference for 2nd derivative: (u_{i+1} - 2u_i + u_{i-1}) / dx^2
+    u_xx = (
+        torch.roll(u, shifts=-1, dims=1)
+        - 2.0 * u
+        + torch.roll(u, shifts=1, dims=1)
+    ) / (dx**2)
 
-    u_mid = u_pred[:, :-1, :]
+    # ========================================================
+    # 2. TEMPORAL DERIVATIVE (Axis 2 / Dim=-1) -> Non-Periodic
+    # ========================================================
+    u_t = torch.zeros_like(u)
 
-    # spatial derivatives (conservation form)
-    flux = 0.5 * u_mid ** 2
-    flux_x = dx(flux, dx_val)
+    # Interior points: Central difference (u_{t+1} - u_{t-1}) / 2dt
+    u_t[..., 1:-1] = (u[..., 2:] - u[..., :-2]) / (2.0 * dt)
 
-    u_xx = dxx(u_mid, dx_val)
+    # Boundaries: 1st-order forward/backward differences to keep it simple & clean
+    u_t[..., 0] = (u[..., 1] - u[..., 0]) / dt  # Forward at t=0
+    u_t[..., -1] = (u[..., -1] - u[..., -2]) / dt  # Backward at t=max
 
-    # residual
-    res = u_t + flux_x - nu * u_xx
+    # ========================================================
+    # 3. BURGERS' EQUATION RESIDUAL
+    # ========================================================
+    residual = u_t + u * u_x - nu * u_xx
+    return residual
+    # """
+    # u_pred: (B, T, X)
+    # nu: scalar or (B, 1, 1)
+    # """
 
-    return res
+    # # time derivative
+    # u_t = (u_pred[:, 1:, :] - u_pred[:, :-1, :]) / dt_val
+
+    # u_mid = u_pred[:, :-1, :]
+
+    # # spatial derivatives (conservation form)
+    # flux = 0.5 * u_mid ** 2
+    # flux_x = dx(flux, dx_val)
+
+    # u_xx = dxx(u_mid, dx_val)
+
+    # # residual
+    # res = u_t + flux_x - nu * u_xx
+
+    # return res

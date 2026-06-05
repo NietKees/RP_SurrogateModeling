@@ -54,7 +54,7 @@ def get_darcy_setup(cfg=None, resolution=64, batch_size=32):
     )
     return dataloader, validator
 
-def get_burgers_setup(cfg):
+def get_burgers_setup(cfg, batch_size=32):
     """Factory function creating the DataLoader and GridValidator for Burgers 1D+Time."""
     
     # Extract structural configuration properties from Hydra DictConfig safely
@@ -63,7 +63,7 @@ def get_burgers_setup(cfg):
     nu = getattr(cfg.physics, "nu", 0.05)
     tmax = getattr(cfg.physics, "tmax", 1.0)
     
-    batch_size = cfg.training.batch_size
+    # batch_size = cfg.training.batch_size
     num_samples = getattr(cfg.training, "pseudo_epoch_sample_size", 1000)
 
     # Instantiate the standard training dataset

@@ -10,6 +10,7 @@ def get_physics_informer(device, equation, method="finite_difference", res=64):
 
     if(equation == 'darcy'):
         forcing_fn = 1.0 # scale:* 4.49996e00 * 3.88433e-03  # after scaling
+        # forcing_fn = 4.49996e00 * 3.88433e-03  # after scaling
         equation = Diffusion(T="u", time=False, dim=2, D="k", Q=forcing_fn) 
         # equation = DarcyPDE(forcing_fn=1.0)
     elif(equation == 'burger'):

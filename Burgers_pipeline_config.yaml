@@ -1,0 +1,162 @@
+# Global Settings - Shared by all models
+equation: "burgers"
+resolution: 128
+test_samples: 32
+
+# Phase Toggles
+do_fno: False
+do_pinn: False
+do_pino: False
+
+# Normalizer values must be identical for all models to compare them fairly
+normaliser:
+  permeability:
+    mean: 1.25
+    std_dev: 0.75
+  darcy:
+    mean: 4.52E-2
+    std_dev: 2.79E-2
+
+# Define a shared architecture template to avoid double-entry
+# This is used by both FNO and PINO
+fno_shared_arch:
+  in_channels: 1
+  out_channels: 1
+  dimension: 2
+  latent_channels: 64
+  num_fno_layers: 4
+  num_fno_modes: 16 # should be [16, 12]
+  padding: 8
+  decoder_layers: 2
+  decoder_layer_size: 32
+  out_features: 1
+
+training:
+    target_error_threshold: 0.01
+    resolution: 256
+    batch_size: 32
+    rec_results_freq : 8
+    max_pseudo_epochs: 256
+    pseudo_epoch_sample_size: 2048
+    start_lr: 5e-4
+    gamma: 0.985 # 0.9994
+
+    nt: 100
+    nx: 128
+    nu: 0.05
+
+scheduler:
+  
+# --- FNO CONFIG ---
+fno:
+  normaliser: ${normaliser}
+  arch: ${fno_shared_arch}
+  training: ${training}
+    # resolution: 64
+    # batch_size: 64
+    # rec_results_freq : 8
+    # max_pseudo_epochs: 1024
+    # pseudo_epoch_sample_size: 2048
+    # start_lr: 0.001
+    # gamma: 0.9994
+  validation:
+    sample_size: 256
+    validation_pseudo_epochs: 4
+  scheduler:
+    initial_lr: 5.E-4
+    decay_rate: .85
+    decay_pseudo_epochs: 8
+
+# --- PINN CONFIG (MLP) ---
+pinn:
+  equation: ${equation}
+  normaliser: ${normaliser}
+  # training: ${training}
+  parameters:
+    num_params: 2
+    ranges:
+      permeability_scale: [0.1, 5.0]
+      source_strength: [0.1, 10.0]
+  arch:
+    latent_dim: 32
+    hidden_dim: 128
+    num_layers: 4
+    # layers: 6
+    # layer_size: 512          # FIXED: Increased from 128 to handle parametric complexity
+    # activation: "silu"       # FIXED: Switched from tanh to silu for better gradient propagation
+  training:
+    batch_size: 4
+    checkpoint_freq: 100
+
+    # batch_size: 32           # Number of unique parameter sets sampled per batch
+    max_epochs: 5000
+    start_lr: 1.E-3
+    # checkpoint_freq: 500
+    resolution: 64           # Grid resolution for your 4D PhysicsInformer
+    rec_results_freq: 100
+    target_error_threshold: 0.005
+    gamma: 0.9995            # FIXED: Changed from 0.995 so your LR doesn't vanish mid-run
+    steps_per_epoch: 32      
+    num_collocation_points: 512
+    num_boundary_points: 4096
+  physics:
+    forcing_term: 1.0        
+    grad_method: "fd"        # RECOMMENDED: Use Finite Difference / Numerical stencil if utilizing PhysicsInformer
+    pde_weight: 1.0
+    bc_weight: 10.0          # FIXED: Boosted from 0.5 to anchor the unsupervised model to the boundaries
+  scheduler:
+    initial_lr: 1e-3
+    gamma: 0.9995
+    type: "adam"
+  validation:
+    sample_size: 256
+    validation_pseudo_epochs: 4
+
+# --- PINO CONFIG (Hybrid) ---
+pino:
+  equation: ${equation}
+  normaliser: ${normaliser}
+  arch: ${fno_shared_arch} 
+  training: ${training}
+  physics:
+    weight: 0.1
+    grad_method: "finite_difference" # "spectral" #TODO try function_wise -> supposed to be faster and more stable or fourier
+  validation:
+      sample_size: 256
+      validation_pseudo_epochs: 4
+  scheduler:
+    initial_lr: 5.E-4
+    decay_rate: .85
+    decay_pseudo_epochs: 8
+
+# --- PINO CONFIG (Hybrid) ---
+pifno:
+  equation: ${equation}
+  normaliser: ${normaliser}
+  arch: ${fno_shared_arch}
+    # activation_fn: "gelu"  # Smoother than ReLU, helps recover high modes [8, 9]
+  training:
+    # target_error_threshold: 0.015 # Zero-data DARCY usually hits ~1.5% [10]
+    resolution: 64
+    batch_size: 64         # Larger batches stabilize the PDE gradient [11]
+    max_pseudo_epochs: 512 # Increased: Zero-data needs more time to find the manifold [4]
+    start_lr: 1e-3         # Higher initial LR to "kickstart" the physics discovery
+    pseudo_epoch_sample_size: 2048
+    target_error_threshold: 0.01
+    rec_results_freq : 8
+    gamma: 0.985 # 0.9994
+
+    # max_pseudo_epochs: 256
+    # start_lr: 5e-4
+ 
+  physics:
+    weight: 1.0            # No data loss to balance against
+    grad_method: "function_wise" # MANDATORY for spectral stability [5, 12]
+  
+  scheduler:
+    initial_lr: 5e-4
+    decay_rate: 0.5
+    decay_pseudo_epochs: 8 # Decay every 100 epochs as per original FNO paper [13, 14]
+  validation:
+    sample_size: 256
+    validation_pseudo_epochs: 4

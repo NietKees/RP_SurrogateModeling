@@ -62,26 +62,26 @@ def test_models_ood(cfg: DictConfig):
     # ]
 
     scenarios= [
-        {"name": "Standard (Train)", "k": [0.5, 2.0], "freq": 5, "res": 128},
+        # {"name": "Standard (Train)", "k": [0.5, 2.0], "freq": 5, "res": 128},
 
-        {"name": "Smaller range within training range", "k": [0.5, 1.0], "freq": 5, "res": 128},
+        # {"name": "Smaller range within training range", "k": [0.5, 1.0], "freq": 5, "res": 128},
         {"name": "Larger range around training range", "k": [0.0, 3.0], "freq": 5, "res": 128},
-        {"name": "light underflow", "k": [1e-1, 2.0], "freq": 5, "res": 128},
-        {"name": "light overflow", "k": [1.0, 5.0], "freq": 5, "res": 128},
+        # {"name": "light underflow", "k": [1e-1, 2.0], "freq": 5, "res": 128},
+        # {"name": "light overflow", "k": [1.0, 5.0], "freq": 5, "res": 128},
 
-        {"name": "light below training (Clay)", "k": [1e-1, 0.5], "freq": 5, "res": 128},
-        {"name": "Medium below training (Clay)", "k": [1e-3, 1e-1], "freq": 5, "res": 128},
-        {"name": "Extreme Clay", "k": [1e-7, 1e-6], "freq": 5, "res": 128},
+        # {"name": "light below training (Clay)", "k": [1e-1, 0.5], "freq": 5, "res": 128},
+        # {"name": "Medium below training (Clay)", "k": [1e-3, 1e-1], "freq": 5, "res": 128},
+        # {"name": "Extreme Clay", "k": [1e-7, 1e-6], "freq": 5, "res": 128},
 
-        {"name": "smaller visosity (0.5)", "k": [0.5 * (1/0.5), 2 * (1/0.5)], "freq": 5, "res": 128},
-        {"name": "larger visosity (2)", "k": [0.5 * (1/2), 2 * (1/2)], "freq": 5, "res": 128},
+        # {"name": "smaller visosity (0.5)", "k": [0.5 * (1/0.5), 2 * (1/0.5)], "freq": 5, "res": 128},
+        # {"name": "larger visosity (2)", "k": [0.5 * (1/2), 2 * (1/2)], "freq": 5, "res": 128},
 
-        {"name": "Medium Flow gravel", "k": [2.0, 5.0], "freq": 5, "res": 128},
-        {"name": "High Flow Gravel", "k": [5.0, 10.0], "freq": 5, "res": 128},
+        # {"name": "Medium Flow gravel", "k": [2.0, 5.0], "freq": 5, "res": 128},
+        # {"name": "High Flow Gravel", "k": [5.0, 10.0], "freq": 5, "res": 128},
 
-        {"name": "High Complexity", "k": [0.5, 2.0], "freq": 25, "res": 128},
-        {"name": "ZeroShot_SuperRes_128", "k": [0.5, 2.0], "freq": 5, "res": 256},
-        {"name": "ZeroShot_SuperRes_256", "k": [0.5, 2.0], "freq": 5, "res": 512}, 
+        # {"name": "High Complexity", "k": [0.5, 2.0], "freq": 25, "res": 128},
+        # {"name": "ZeroShot_SuperRes_128", "k": [0.5, 2.0], "freq": 5, "res": 256},
+        # {"name": "ZeroShot_SuperRes_256", "k": [0.5, 2.0], "freq": 5, "res": 512}, 
     ]
 
     # Persistent normalization from training

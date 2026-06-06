@@ -1,121 +1,82 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-import matplotlib
-matplotlib.use('Agg') # Safe for remote server executions
-import matplotlib.pyplot as plt
 
 from physicsnemo.datapipes.benchmarks.darcy import Darcy2D
 from physicsnemo.sym.eq.pdes.diffusion import Diffusion
 from physicsnemo.sym.eq.phy_informer import PhysicsInformer
 
-def denormalize(tensor, mean, std):
-    return (tensor * std) + mean
-
-def get_physics_informer(device, equation, method="finite_difference", res=64):
-    if(equation == 'darcy'):
-        forcing_fn = 1.0 
-        equation = Diffusion(T="u", time=False, dim=2, D="k", Q=forcing_fn)
-    else:
-        raise ValueError('Equation not defined')
-
-    eq_name = equation.__class__.__name__.lower()
-    out_key = f"{eq_name}_u"
-    dx = 1.0 / (res + 1)
-    
-    return PhysicsInformer(
-        required_outputs=[out_key],
-        equations=equation,
-        grad_method=method,
-        device=device,
-        fd_dx=dx if method == "finite_difference" else None
-    )
-
-def test_limits_and_visualize():
+def test_native_physicsnemo_normalized_pino_case():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Testing on device: {device}")
+    print(f"Executing Official PhysicsNeMo PINO Reference Test on: {device}\n")
 
-    # Explicit normalizer stats provided
+    # 1. Geometry Setup 
+    # The official dataset uses 1/N grid spacing for its structural layout
+    resolution = 64
+    dx = 1.0 / resolution  
+
+    # 2. Dataset Normalization Statistics
     norm_stats = {
         "permeability": (1.25, 0.75),
         "darcy": (0.0452, 0.0279)
     }
+    k_mean, k_std = norm_stats["permeability"]
+    u_mean, u_std = norm_stats["darcy"]
 
-    test_cases = [
-        {"name": "Standard (Train)", "k": [0.5, 2.0], "freq": 5},
-    ]
+    # 3. Pull a Ground-Truth Batch from the Darcy2D Pipe
+    datapipe = Darcy2D(
+        resolution=resolution,
+        batch_size=1,
+        min_permeability=0.5,
+        max_permeability=2.0,
+        nr_permeability_freq=5,
+        normaliser=norm_stats,
+        device=device
+    )
+    batch = next(iter(datapipe))
+    k_norm = batch["permeability"]  # Shape: [1, 1, 64, 64]
+    u_norm = batch["darcy"]         # Shape: [1, 1, 64, 64]
 
-    for case in test_cases:
-        print(f"\n--- Running Case: {case['name']} ---")
-        try:
-            datapipe = Darcy2D(
-                resolution=64,
-                batch_size=1,
-                min_permeability=case['k'][0],
-                max_permeability=case['k'][1],
-                nr_permeability_freq=case['freq'],
-                normaliser=norm_stats,
-                device=device
-            )
+    # 4. Reconstruct the Adjusted Forcing Function (Q_scaled)
+    # This is the exact step from the reference script where forcing is scaled down:
+    # scaled_forcing = physical_forcing * (u_std / k_std)
+    scaled_forcing_q = 1.0 * (u_std / k_std)
+    print(f"Calculated Adjusted Forcing Function (Q_scaled): {scaled_forcing_q:.6f}")
 
-            batch = next(iter(datapipe))
-            k_norm = batch["permeability"]  
-            u_norm = batch["darcy"]         
+    # 5. Define the Diffusion Equation inside the Normalized Frame
+    darcy_equation = Diffusion(T="u", time=False, dim=2, D="k", Q=scaled_forcing_q)
 
-            # 1. DENORMALIZE to original physical scale
-            k_phys = denormalize(k_norm, norm_stats["permeability"][0], norm_stats["permeability"][1])
-            u_phys = denormalize(u_norm, norm_stats["darcy"][0], norm_stats["darcy"][1])
+    # 6. Initialize the Native PhysicsInformer Engine
+    phy_informer = PhysicsInformer(
+        required_outputs=["diffusion_u"],
+        equations=darcy_equation,
+        grad_method="finite_difference",
+        device=device,
+        fd_dx=dx
+    )
 
-            # 2. Initialize Informer using FINITE DIFFERENCE 
-            informer = get_physics_informer(device, equation='darcy', method="finite_difference", res=64)
+    # 7. Evaluate the Residual in Normalized Space (No Denormalization)
+    with torch.no_grad():
+        residuals = phy_informer.forward(
+            {
+                "u": u_norm,
+                "k": k_norm,
+            }
+        )
+        pde_out_arr = residuals["diffusion_u"]
+
+        # Evaluate across the official crop frames to witness the balanced alignment
+        print(f"\n=================== OFFICIAL PINO VERIFICATION ===================")
+        for crop_margin in [2, 4, 6]:
+            # Slice away the boundaries dropped or padded by the physics layers
+            cropped_residual = pde_out_arr[..., crop_margin:-crop_margin, crop_margin:-crop_margin]
             
-            # 3. Compute residuals on physical scale (Finite difference doesn't need external coordinates)
-            with torch.no_grad():
-                residuals = informer.forward({
-                    "u": u_phys, 
-                    "k": k_phys
-                })
-            pde_residual_tensor = residuals["diffusion_u"]
+            # PhysicsNeMo utilizes F.l1_loss during its standard backprop training pass
+            loss_pde_l1 = F.l1_loss(cropped_residual, torch.zeros_like(cropped_residual)).item()
+            loss_pde_mse = F.mse_loss(cropped_residual, torch.zeros_like(cropped_residual)).item()
             
-            # 4. Calculate metrics
-            mean_full = torch.mean(torch.abs(pde_residual_tensor)).item()
-            # Crop away the outer boundary padding layer where the Warp data loader cut off the edges
-            pde_cropped = pde_residual_tensor[..., 3:-3, 3:-3]
-            mean_cropped = torch.mean(torch.abs(pde_cropped)).item()
-
-            print(f"  Permeability Range: {case['k']}")
-            print(f"  Physical Max Expected: {u_phys.max().item():.4e} | Min: {u_phys.min().item():.4e}")
-            print(f"  ---> PHYSICAL MEAN RESIDUAL (FULL):    {mean_full:.6f}")
-            print(f"  ---> PHYSICAL MEAN RESIDUAL (CROPPED): {mean_cropped:.6f}")
-            
-            # 5. VISUALIZATION
-            u_phys_2d = u_phys.squeeze().cpu().detach().numpy()
-            res_2d = torch.abs(pde_residual_tensor).squeeze().cpu().detach().numpy()
-
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-            # Left Plot: True physical scale pressure field
-            im0 = axes[0].imshow(u_phys_2d, cmap='viridis')
-            axes[0].set_title(f"Physical Darcy Pressure (u)\nMax: {u_phys_2d.max().item():.4f}")
-            fig.colorbar(im0, ax=axes[0])
-
-            # Right Plot: Exact physical error distribution map
-            vmax_val = np.percentile(res_2d, 95) if np.any(res_2d) else 1.0
-            im1 = axes[1].imshow(res_2d, cmap='hot', vmin=0, vmax=vmax_val) 
-            axes[1].set_title(f"Absolute Physical PDE Residual\nMean Full: {mean_full:.4f} | Cropped: {mean_cropped:.4f}")
-            fig.colorbar(im1, ax=axes[1])
-
-            plt.tight_layout()
-            
-            output_filename = "pde_debug_residual.png"
-            plt.savefig(output_filename, dpi=150)
-            print(f"\n[SUCCESS] Heatmap plot saved successfully to remote disk as: '{output_filename}'")
-            plt.close(fig)
-
-        except Exception as e:
-            print(f"  CRITICAL ERROR DURING TEST: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Crop Layer: c={crop_margin} | L1 Loss: {loss_pde_l1:.6f} | MSE Loss: {loss_pde_mse:.6f}")
+        print(f"==================================================================")
 
 if __name__ == "__main__":
-    test_limits_and_visualize()
+    test_native_physicsnemo_normalized_pino_case()

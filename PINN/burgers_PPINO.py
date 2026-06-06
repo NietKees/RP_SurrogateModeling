@@ -104,6 +104,9 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
     # ========================================================
     # TRAINING STEP
     # ========================================================
+    # ========================================================
+    # OPTIMIZED PURE-PHYSICS FNO TRAINING STEP
+    # ========================================================
     @StaticCaptureTraining(
         model=model, optim=optimizer, logger=log, use_amp=False, use_graphs=False
     )
@@ -112,26 +115,32 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
             T_steps = target.shape[-1]
             invars = invars.unsqueeze(-1).repeat(1, 1, 1, T_steps)
             
+        # 1. Generate full spacetime field prediction
         pred = model(invars)
         
-        # 1. Supervised Data Loss
-        loss_data = loss_fun(pred, target)
+        # 2. PURE PHYSICS ANCHOR: Initial Condition Constraint (t = 0)
+        # Extract the network's prediction at the exact initial timestamp index [..., 0]
+        # and match it against the raw input snapshot profile.
+        # invars shape is [B, channels, nx, nt]; invars[:, :, :, 0] is the true IC curve.
+        pred_ic = pred[:, :, :, 0]
+        true_ic = invars[:, :, :, 0]
+        loss_ic = loss_fun(pred_ic, true_ic)
         
-        # 2. Physics-Informed Unsupervised Residual Loss
-        # pde_residual = burgers_physics_residual(pred, nu, dx, dt)
+        # 3. Interior Domain Physics Residual Loss
         pde_residual = burgers_physics_residual(pred, nu=cfg.training.nu, dx_val=dx, dt_val=dt)
         loss_pde = F.mse_loss(pde_residual, torch.zeros_like(pde_residual))
 
-        sol_pde_residual = burgers_physics_residual(target, nu=cfg.training.nu, dx_val=dx, dt_val=dt)
-        sol_loss = F.mse_loss(sol_pde_residual, torch.zeros_like(sol_pde_residual))
-
-        # Combine Loss using weight scales from configurations
-        physics_weight = getattr(cfg.physics, "weight", 0.1) * 1/nx
-        print(f'data loss: {loss_data},residual loss:{loss_pde}, real_residual_loss: {sol_loss}')
-        # Total combined optimization target
-        loss = 0 * loss_data +  1/nx * loss_pde
+        # 4. Balanced Weight Allocation 
+        # The IC weight must be strong enough to prevent the model from flattening out.
+        ic_weight = 50.0 
+        pde_weight = 1.0 # / nx * 5.0
+        loss = (ic_weight * loss_ic) + (pde_weight * loss_pde)
+        print(f'pde_loss = {loss_pde}, weight: {pde_weight}, loss: {loss}')
+        
+        # Optional diagnostic printout to track alignment during run
+        # print(f"IC Target Loss: {loss_ic.item():.6f} | PDE Variance Loss: {loss_pde.item():.6f}")
+        
         return loss
-
     # ========================================================
     # EVALUATION STEP
     # ========================================================

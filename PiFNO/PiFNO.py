@@ -139,66 +139,53 @@ def main(cfg: DictConfig):
 
     steps_per_pseudo_epoch = 32
     for epoch in range(cfg.training.max_pseudo_epochs):
-        # wrap epoch in launch logger for console logs
         with LaunchLogger(
             "train",
             epoch=epoch,
-            num_mini_batch=len(dataloader),
+            num_mini_batch=steps_per_pseudo_epoch,
             epoch_alert_freq=10,
         ) as log:
             for _, data in zip(range(steps_per_pseudo_epoch), dataloader):
                 optimizer.zero_grad()
-                # invar = data[0]
-                # outvar = data[1]
+                
                 invar = data["permeability"].to(device)
-                outvar = data["darcy"].to(device)
+                outvar = data["darcy"].to(device) # True ground truth field
 
-                # Compute forward pass
+                # 1. Compute forward model pass
                 out = model(invar[:, 0].unsqueeze(dim=1))
 
-                # print(out.shape, invar[:,0:1].shape)
-                residuals = phy_informer.forward(
-                    {
-                        "u": out,
-                        "k": invar[:, 0:1],
-                    }
-                )
+                # 2. Compute Interior PDE Residual
+                residuals = phy_informer.forward({"u": out, "k": invar[:, 0:1]})
                 pde_out_arr = residuals["diffusion_u"]
+                pde_out_arr = F.pad(pde_out_arr[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0)
+                loss_pde = F.mse_loss(pde_out_arr, torch.zeros_like(pde_out_arr))
 
-                pde_out_arr = F.pad(
-                    pde_out_arr[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0
-                )
-                loss_pde = F.l1_loss(pde_out_arr, torch.zeros_like(pde_out_arr))
-
-                # Compute data loss
-                loss_data = F.mse_loss(outvar, out)
+                # 3. FIX: FORCE THE BOUNDARY / CHANNELS (Pure Physics Anchor)
+                # Instead of matching the entire image (data loss), we pull ONLY the 
+                # outer edge values from outvar to anchor the physics solution.
+                mask_boundary = torch.ones_like(out)
+                mask_boundary[:, :, 2:-2, 2:-2] = 0.0  # Isolate only the perimeter edges
                 
-                solutionResiduals = phy_informer.forward(
-                    {
-                        "u": outvar,
-                        "k": invar[:, 0:1]
-                    }
-                )
-                pde_out_arr_solution = solutionResiduals["diffusion_u"]
+                # Penalize edge variance so the wave/field values enter the grid cleanly
+                loss_bc = F.mse_loss(out * mask_boundary, outvar * mask_boundary)
+
+                # 4. Balanced Total Loss Equation
+                bc_weight = 50.0  # Keep high to resist zero collapse
+                pde_weight = 1 / 240 * cfg.physics.weight
                 
-                pde_out_arr_solution = F.pad(
-                    pde_out_arr_solution[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0
-                )
-                loss_pde_solution = F.l1_loss(pde_out_arr_solution, torch.zeros_like(pde_out_arr_solution))
-                # Compute data loss
-                loss_data = F.mse_loss(outvar, out)
+                loss = (bc_weight * loss_bc) + (pde_weight * loss_pde)
 
-                # Compute total loss
-                # loss = loss_data + 1 / 240 * cfg.physics.weight * loss_pde
-                loss = loss_data * 0 + 1 / 240 * cfg.physics.weight * loss_pde / cfg.physics.weight
-
-                # Backward pass and optimizer and learning rate update
+                # Backward pass
                 loss.backward()
                 optimizer.step()
-                scheduler.step()
+                
                 log.log_minibatch(
-                    {"loss_data": loss_data.detach(), "loss_pde": loss_pde.detach(), "solution_pde_loss:": loss_pde_solution.detach()}
+                    {"loss_bc": loss_bc.detach(), "loss_pde": loss_pde.detach()}
                 )
+
+            # FIX: Step the learning rate decay ONCE per epoch loop
+            scheduler.step()
+            log.log_epoch({"Learning Rate": optimizer.param_groups[0]["lr"]})
 
             log.log_epoch({"Learning Rate": optimizer.param_groups[0]["lr"]})
             
@@ -250,7 +237,7 @@ def main(cfg: DictConfig):
 
         with LaunchLogger("valid", epoch=epoch) as log:
             # error = validation_step(model, validation_dataloader, epoch)
-            error = validator.compare(invar, outvar, out, step=epoch, logger=log, title=f'PINO{epoch}')
+            error = validator.compare(invar, outvar, out, step=epoch, logger=log, title=f'PIFNO{epoch}')
             log.log_epoch({"Validation error": error})
 
         save_checkpoint(

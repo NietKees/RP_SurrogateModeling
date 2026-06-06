@@ -13,13 +13,19 @@ cd /scratch/$USER/physicsnemo
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # apptainer exec --nv physicsnemo_26.03.sif \
+# python PINN/burgers_PPINO.py
+# apptainer exec --nv physicsnemo_26.03.sif \
 # python train.py
 
-apptainer exec --nv physicsnemo_26.03.sif \
-python PINO/burgers_PINO.py
+# apptainer exec --nv physicsnemo_26.03.sif \
+# python PINO/burgers_PINO.py
+
+# apptainer exec --nv physicsnemo_26.03.sif \
+# python PINN/Darcys_PPINO.py
+
+# apptainer exec --nv physicsnemo_26.03.sif \
+# python FNO/burgers_FNO.py
 
 apptainer exec --nv physicsnemo_26.03.sif \
-python FNO/burgers_FNO.py
-
-# python test_darcy_generator.py
+python test_darcy_generator.py
 

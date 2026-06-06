@@ -43,9 +43,9 @@ def test_models_ood(cfg: DictConfig):
     # 2. Define Model Paths
     # Ensure these directories exist and contain a 'checkpoint.pt'
     model_configs = {
-        "FNO": "./FNO/Burger_checkpoints",
-        "PINO": "./PINO/Burger_checkpoints",
-        # "PINN": "./PINN/checkpoints"
+        # "FNO": "./FNO/Burger_checkpoints",
+        # "PINO": "./PINO/Burger_checkpoints",
+        "PINN": "./PINN/Burger_checkpoints"
     }
 
     # 3. Define Scenarios

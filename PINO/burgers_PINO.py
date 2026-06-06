@@ -126,7 +126,7 @@ def burgers_fno_trainer(cfg: DictConfig) -> None:
         sol_loss = F.mse_loss(sol_pde_residual, torch.zeros_like(sol_pde_residual))
 
         # Combine Loss using weight scales from configurations
-        physics_weight = getattr(cfg.physics, "weight", 0.1) * 1/nx
+        physics_weight = getattr(cfg.physics, "weight", 0.1) # * 1/nx
         print(f'data loss: {loss_data},residual loss:{loss_pde}, real_residual_loss: {sol_loss}')
         # Total combined optimization target
         loss = loss_data +  physics_weight * loss_pde

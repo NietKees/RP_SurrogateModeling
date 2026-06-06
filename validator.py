@@ -99,7 +99,7 @@ class GridValidator:
             fig.colorbar(im[ii], ax=ax[ii], location="bottom", fraction=0.046, pad=0.04)
             ax[ii].set_title(self.headers[ii])
 
-        if(step % 32 == 0):
+        if(step % 8 == 0):
             if(title != None):
                 logger.log_figure(figure=fig, artifact_file=f"images/{title}.png")
             else:

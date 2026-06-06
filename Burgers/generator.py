@@ -191,54 +191,44 @@ def dxx(u, dx):
 
 
 def burgers_physics_residual(u_pred, nu, dx_val, dt_val):
+    """
+    Correctly evaluates the 1D+Time Burgers equation residual:
+    Residual = u_t + u * u_x - nu * u_xx
+    
+    Assumes u_pred shape is: [B, channels, nx, nt]
+    """
     u = u_pred
     dt = dt_val
     dx = dx_val
-    u_x = (torch.roll(u, shifts=-1, dims=1) - torch.roll(u, shifts=1, dims=1)) / (
-        2.0 * dx
-    )
-
-    # Central difference for 2nd derivative: (u_{i+1} - 2u_i + u_{i-1}) / dx^2
-    u_xx = (
-        torch.roll(u, shifts=-1, dims=1)
-        - 2.0 * u
-        + torch.roll(u, shifts=1, dims=1)
-    ) / (dx**2)
+    
+    # Define explicitly which dimensions correspond to space and time
+    spatial_dim = 2   # nx axis
+    temporal_dim = 3  # nt axis (or -1)
 
     # ========================================================
-    # 2. TEMPORAL DERIVATIVE (Axis 2 / Dim=-1) -> Non-Periodic
+    # 1. SPATIAL DERIVATIVES (Periodic Central Differences on Axis 2)
+    # ========================================================
+    u_x = (torch.roll(u, shifts=-1, dims=spatial_dim) - 
+           torch.roll(u, shifts=1, dims=spatial_dim)) / (2.0 * dx)
+
+    u_xx = (torch.roll(u, shifts=-1, dims=spatial_dim) - 
+            2.0 * u + 
+            torch.roll(u, shifts=1, dims=spatial_dim)) / (dx ** 2)
+
+    # ========================================================
+    # 2. TEMPORAL DERIVATIVES (Non-Periodic Central & Single-Sided)
     # ========================================================
     u_t = torch.zeros_like(u)
 
-    # Interior points: Central difference (u_{t+1} - u_{t-1}) / 2dt
+    # Interior points along the time axis (t=1 to t=nt-2)
     u_t[..., 1:-1] = (u[..., 2:] - u[..., :-2]) / (2.0 * dt)
 
-    # Boundaries: 1st-order forward/backward differences to keep it simple & clean
-    u_t[..., 0] = (u[..., 1] - u[..., 0]) / dt  # Forward at t=0
-    u_t[..., -1] = (u[..., -1] - u[..., -2]) / dt  # Backward at t=max
+    # Boundary conditions for the temporal domain
+    u_t[..., 0] = (u[..., 1] - u[..., 0]) / dt       # Forward finite difference at t=0
+    u_t[..., -1] = (u[..., -1] - u[..., -2]) / dt    # Backward finite difference at t=max
 
     # ========================================================
-    # 3. BURGERS' EQUATION RESIDUAL
+    # 3. BURGERS' RELATION SHIP EVALUATION
     # ========================================================
-    residual = u_t + u * u_x - nu * u_xx
+    residual = u_t + (u * u_x) - (nu * u_xx)
     return residual
-    # """
-    # u_pred: (B, T, X)
-    # nu: scalar or (B, 1, 1)
-    # """
-
-    # # time derivative
-    # u_t = (u_pred[:, 1:, :] - u_pred[:, :-1, :]) / dt_val
-
-    # u_mid = u_pred[:, :-1, :]
-
-    # # spatial derivatives (conservation form)
-    # flux = 0.5 * u_mid ** 2
-    # flux_x = dx(flux, dx_val)
-
-    # u_xx = dxx(u_mid, dx_val)
-
-    # # residual
-    # res = u_t + flux_x - nu * u_xx
-
-    # return res
